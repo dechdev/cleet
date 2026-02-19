@@ -14,9 +14,10 @@ Run multiple Claude Code agents in parallel. Each agent gets its own git worktre
 ## Install
 
 ```bash
+cd ~/Desktop
 git clone git@github.com:dechdev/cleet.git
 brew install tmux jq
-cd ~/cleet
+cd ~/Desktop/cleet
 ./bin/cleet setup
 ```
 
@@ -124,7 +125,7 @@ Without this, checks are auto-detected from `package.json`, `Cargo.toml`, `pypro
 ## Updating
 
 ```bash
-cd ~/cleet
+cd ~/Desktop/cleet
 git pull
 ./bin/cleet setup
 ```
