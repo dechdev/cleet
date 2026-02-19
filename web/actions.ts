@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
-const SWARM_BIN = join(process.env.HOME!, ".claude-swarm", "bin", "swarm");
+const CLEET_BIN = join(process.env.HOME!, ".cleet", "bin", "cleet");
 
 export interface ActionResult {
   ok: boolean;
@@ -10,7 +10,7 @@ export interface ActionResult {
 
 function run(args: string[]): Promise<ActionResult> {
   return new Promise((resolve) => {
-    execFile(SWARM_BIN, args, { timeout: 30000 }, (error, stdout, stderr) => {
+    execFile(CLEET_BIN, args, { timeout: 30000 }, (error, stdout, stderr) => {
       const output = (stdout || "") + (stderr || "");
       resolve({ ok: !error, output: output.trim() });
     });
@@ -20,7 +20,7 @@ function run(args: string[]): Promise<ActionResult> {
 // Long-running actions (diff, log, ship) get more time
 function runLong(args: string[]): Promise<ActionResult> {
   return new Promise((resolve) => {
-    execFile(SWARM_BIN, args, { timeout: 120000 }, (error, stdout, stderr) => {
+    execFile(CLEET_BIN, args, { timeout: 120000 }, (error, stdout, stderr) => {
       const output = (stdout || "") + (stderr || "");
       resolve({ ok: !error, output: output.trim() });
     });

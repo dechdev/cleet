@@ -3,7 +3,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 
-const SWARM_DIR = join(process.env.HOME!, ".claude-swarm");
+const CLEET_DIR = join(process.env.HOME!, ".cleet");
 
 export interface CheckResult {
   command: string;
@@ -29,7 +29,7 @@ export interface AgentState {
   paneOutput: string[];
 }
 
-export interface SwarmState {
+export interface CleetState {
   session: string;
   workdir: string;
   layout: string;
@@ -89,7 +89,7 @@ function capturePaneOutput(
   return new Promise((resolve) => {
     let target: string;
     if (layout === "grid") {
-      target = `${session}:swarm.${paneBase + agentId - 1}`;
+      target = `${session}:cleet.${paneBase + agentId - 1}`;
     } else {
       target = `${session}:agent-${agentId}`;
     }
@@ -111,19 +111,19 @@ async function readAgentState(
   layout: string,
   paneBase: number
 ): Promise<AgentState> {
-  const statusText = await readText(join(SWARM_DIR, "status", `agent-${id}.status`));
+  const statusText = await readText(join(CLEET_DIR, "status", `agent-${id}.status`));
   const status: "idle" | "working" = statusText === "idle" ? "idle" : "working";
 
   let statusAge = 0;
   try {
-    const s = await stat(join(SWARM_DIR, "status", `agent-${id}.status`));
+    const s = await stat(join(CLEET_DIR, "status", `agent-${id}.status`));
     statusAge = Math.floor((Date.now() - s.mtimeMs) / 1000);
   } catch {}
 
-  const task = await readText(join(SWARM_DIR, "tasks", `agent-${id}.task`));
+  const task = await readText(join(CLEET_DIR, "tasks", `agent-${id}.task`));
 
   const costData = await readJson<{ input_tokens: number; output_tokens: number }>(
-    join(SWARM_DIR, "cost", `agent-${id}.cost`)
+    join(CLEET_DIR, "cost", `agent-${id}.cost`)
   );
   const tokens = {
     input: costData?.input_tokens ?? 0,
@@ -134,23 +134,23 @@ async function readAgentState(
     files_changed: number;
     insertions: number;
     deletions: number;
-  }>(join(SWARM_DIR, "progress", `agent-${id}.json`));
+  }>(join(CLEET_DIR, "progress", `agent-${id}.json`));
   const changes = {
     files: progressData?.files_changed ?? 0,
     insertions: progressData?.insertions ?? 0,
     deletions: progressData?.deletions ?? 0,
   };
 
-  const filesText = await readText(join(SWARM_DIR, "progress", `agent-${id}.files`));
+  const filesText = await readText(join(CLEET_DIR, "progress", `agent-${id}.files`));
   const modifiedFiles = filesText ? filesText.split("\n").filter(Boolean) : [];
 
-  const lastLinesText = await readText(join(SWARM_DIR, "progress", `agent-${id}.lastlines`));
+  const lastLinesText = await readText(join(CLEET_DIR, "progress", `agent-${id}.lastlines`));
   const lastLines = lastLinesText ? lastLinesText.split("\n").filter(Boolean) : [];
 
   const checksData = await readJson<{
     overall: "pass" | "fail";
     results: CheckResult[];
-  }>(join(SWARM_DIR, "checks", `agent-${id}.json`));
+  }>(join(CLEET_DIR, "checks", `agent-${id}.json`));
   const checks = checksData
     ? { overall: checksData.overall, results: checksData.results ?? [] }
     : null;
@@ -174,13 +174,13 @@ async function readAgentState(
   };
 }
 
-export async function readSwarmState(): Promise<SwarmState> {
-  const session = await readText(join(SWARM_DIR, "session"));
-  const workdir = await readText(join(SWARM_DIR, "workdir"));
-  const layout = await readText(join(SWARM_DIR, "layout"));
-  const numAgentsStr = await readText(join(SWARM_DIR, "num_agents"));
+export async function readCleetState(): Promise<CleetState> {
+  const session = await readText(join(CLEET_DIR, "session"));
+  const workdir = await readText(join(CLEET_DIR, "workdir"));
+  const layout = await readText(join(CLEET_DIR, "layout"));
+  const numAgentsStr = await readText(join(CLEET_DIR, "num_agents"));
   const numAgents = parseInt(numAgentsStr, 10) || 0;
-  const paneBaseStr = await readText(join(SWARM_DIR, "pane_base"));
+  const paneBaseStr = await readText(join(CLEET_DIR, "pane_base"));
   const paneBase = parseInt(paneBaseStr, 10) || 0;
 
   const agents: AgentState[] = [];
@@ -216,7 +216,7 @@ export async function readSwarmState(): Promise<SwarmState> {
   };
 }
 
-export type StateChangeCallback = (state: SwarmState) => void;
+export type StateChangeCallback = (state: CleetState) => void;
 
 export function watchState(callback: StateChangeCallback): () => void {
   const watchers: FSWatcher[] = [];
@@ -227,7 +227,7 @@ export function watchState(callback: StateChangeCallback): () => void {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(async () => {
       try {
-        const state = await readSwarmState();
+        const state = await readCleetState();
         callback(state);
       } catch {}
     }, 200);
@@ -236,7 +236,7 @@ export function watchState(callback: StateChangeCallback): () => void {
   // Watch each state directory
   const dirs = ["status", "cost", "tasks", "checks", "progress"];
   for (const dir of dirs) {
-    const dirPath = join(SWARM_DIR, dir);
+    const dirPath = join(CLEET_DIR, dir);
     try {
       const w = watch(dirPath, { persistent: false }, () => notify());
       watchers.push(w);
@@ -245,7 +245,7 @@ export function watchState(callback: StateChangeCallback): () => void {
 
   // Also watch top-level config files
   try {
-    const w = watch(SWARM_DIR, { persistent: false }, (_event, filename) => {
+    const w = watch(CLEET_DIR, { persistent: false }, (_event, filename) => {
       if (
         filename &&
         ["session", "workdir", "layout", "num_agents"].includes(filename)

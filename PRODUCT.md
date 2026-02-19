@@ -59,7 +59,7 @@ At current API pricing, running 5 agents actively for an hour might cost $5-25 d
 | Cursor subagents | Background agents in IDE | Tied to Cursor, limited visibility |
 | Claude Code `Task` tool | Child agent within single session | No persistent parallel agents |
 | OpenAI Codex | Cloud-hosted agent | No local, no multi-agent |
-| Various "swarm" frameworks | Multi-agent orchestration | Developer-facing, no UX |
+| Various "cleet" frameworks | Multi-agent orchestration | Developer-facing, no UX |
 
 ## Differentiation
 
@@ -72,19 +72,19 @@ At current API pricing, running 5 agents actively for an hour might cost $5-25 d
 ## Level 0 → Level 1: The Five Pain Points
 
 Level 0 (current tmux script) works but has five real friction points.
-Level 1 solves all five. **Status: IMPLEMENTED** via the `swarm` CLI.
+Level 1 solves all five. **Status: IMPLEMENTED** via the `cleet` CLI.
 
 ### Level 1 Implementation Summary
 
-The `swarm` CLI (`~/.claude-swarm/bin/swarm`) provides:
+The `cleet` CLI (`~/.cleet/bin/cleet`) provides:
 
 | Pain Point | Solution | Command |
 |------------|----------|---------|
-| 1. No visibility | Live dashboard | `swarm dash` |
-| 2. No cross-agent messaging | tmux send-keys | `swarm send <N> "msg"` |
+| 1. No visibility | Live dashboard | `cleet dash` |
+| 2. No cross-agent messaging | tmux send-keys | `cleet send <N> "msg"` |
 | 3. File edit conflicts | Git worktrees per agent | automatic in git repos |
-| 4. Forgetting agent tasks | Persistent task labels | `swarm task <N> "desc"` |
-| 5. No cost tracking | Stop hook + token parsing | `swarm dash` (token column) |
+| 4. Forgetting agent tasks | Persistent task labels | `cleet task <N> "desc"` |
+| 5. No cost tracking | Stop hook + token parsing | `cleet dash` (token column) |
 
 ---
 
@@ -96,9 +96,9 @@ The `swarm` CLI (`~/.claude-swarm/bin/swarm`) provides:
 
 Each Claude agent writes a one-line status to a shared file:
 ```
-~/.claude-swarm/status/agent-1.status  →  "Working: refactoring auth middleware (2m ago)"
-~/.claude-swarm/status/agent-2.status  →  "Waiting: needs user input"
-~/.claude-swarm/status/agent-3.status  →  "Done: tests passing (30s ago)"
+~/.cleet/status/agent-1.status  →  "Working: refactoring auth middleware (2m ago)"
+~/.cleet/status/agent-2.status  →  "Waiting: needs user input"
+~/.cleet/status/agent-3.status  →  "Done: tests passing (30s ago)"
 ```
 
 A dedicated tmux pane (or window) runs a `watch`-style dashboard that reads all status files and renders a live overview:
@@ -125,9 +125,9 @@ A dedicated tmux pane (or window) runs a `watch`-style dashboard that reads all 
 
 **Solution: Message queue via filesystem**
 
-A simple command — `swarm send 3 "run the test suite"` — drops a message:
+A simple command — `cleet send 3 "run the test suite"` — drops a message:
 ```
-~/.claude-swarm/inbox/agent-3.msg  →  "run the test suite"
+~/.cleet/inbox/agent-3.msg  →  "run the test suite"
 ```
 
 Each agent has a watcher (or Claude Code hook) that picks up messages from its inbox and injects them as the next prompt. This could be:
@@ -136,11 +136,11 @@ Each agent has a watcher (or Claude Code hook) that picks up messages from its i
 - A Claude Code hook that checks the inbox on each turn
 - A tmux `send-keys` to the target window (simplest, most reliable):
   ```bash
-  swarm send 3 "run the test suite"
-  # → tmux send-keys -t claude-swarm:3 "run the test suite" Enter
+  cleet send 3 "run the test suite"
+  # → tmux send-keys -t cleet:3 "run the test suite" Enter
   ```
 
-The `tmux send-keys` approach works today with zero infrastructure. We just need a `swarm` CLI wrapper.
+The `tmux send-keys` approach works today with zero infrastructure. We just need a `cleet` CLI wrapper.
 
 ---
 
@@ -167,8 +167,8 @@ Each agent works on its own branch in its own worktree. No conflicts possible du
 **Implementation:**
 - `multi-claude.sh` creates worktrees with `git worktree add`
 - Each agent's tmux window `cd`s into its worktree
-- New `swarm merge <agent>` command merges an agent's branch back
-- Agent branches named `swarm/agent-1`, `swarm/agent-2`, etc.
+- New `cleet merge <agent>` command merges an agent's branch back
+- Agent branches named `cleet/agent-1`, `cleet/agent-2`, etc.
 
 **Tradeoff:** Uses more disk space (one working copy per agent). Worth it for isolation. Git worktrees use hardlinks for the object store so it's not a full clone.
 
@@ -182,14 +182,14 @@ Each agent works on its own branch in its own worktree. No conflicts possible du
 
 When you assign work, it sticks:
 ```bash
-swarm task 1 "refactor auth middleware"
-swarm task 2 "build REST endpoints for users API"
-swarm task 3 "write integration tests"
+cleet task 1 "refactor auth middleware"
+cleet task 2 "build REST endpoints for users API"
+cleet task 3 "write integration tests"
 ```
 
 This does two things:
 1. Renames the tmux window: `agent-1` → `1:auth-refactor`
-2. Writes to `~/.claude-swarm/tasks/agent-1.task` for persistence
+2. Writes to `~/.cleet/tasks/agent-1.task` for persistence
 
 The tmux status bar always shows what each agent is doing:
 ```
@@ -211,9 +211,9 @@ Optionally: when you assign a task, the message is also sent to the agent as a p
 Claude Code shows cost info in its output. We capture it:
 
 - Claude Code hook on `stop` event extracts the session cost
-- Writes to `~/.claude-swarm/cost/agent-1.cost`
+- Writes to `~/.cleet/cost/agent-1.cost`
 - Dashboard (Pain 1) aggregates and displays per-agent and total cost
-- Optionally: set a budget cap in `swarm config` — if total exceeds $X, alert or pause agents
+- Optionally: set a budget cap in `cleet config` — if total exceeds $X, alert or pause agents
 
 ```
 ┌─ Cost Tracker ─────────────┐
@@ -235,13 +235,13 @@ Prioritized by impact and feasibility:
 
 | # | What | Why first | Effort |
 |---|------|-----------|--------|
-| 1 | `swarm` CLI + task assignment (Pain 4) | Solves "which agent is doing what" immediately | Small — tmux rename + file |
+| 1 | `cleet` CLI + task assignment (Pain 4) | Solves "which agent is doing what" immediately | Small — tmux rename + file |
 | 2 | Git worktrees (Pain 3) | Prevents silent data loss, must exist before real parallel work | Medium — script changes |
 | 3 | Cross-agent messaging via `tmux send-keys` (Pain 2) | Unblocks directing agents without switching | Small — wrapper command |
 | 4 | Dashboard pane (Pain 1) | Shows everything at a glance | Medium — watch script + status parsing |
 | 5 | Cost tracking (Pain 5) | Important but not blocking usage | Medium — hook + parsing |
 
-All five fit into a single `swarm` CLI tool that wraps tmux.
+All five fit into a single `cleet` CLI tool that wraps tmux.
 
 ---
 
@@ -253,20 +253,20 @@ Level 2 closes every gap between "agents are running" and "code is merged to mai
 
 | Feature | Command | What it does |
 |---------|---------|-------------|
-| Brain-dump tasks | `swarm plan "t1" "t2" ...` | Batch-dispatch to all agents at once |
-| Code review | `swarm diff N [--stat\|--files]` | Review agent's changes vs main |
-| Commit history | `swarm log N` | Show agent's commits |
-| Quality checks | `swarm check N [--fix]` | Run lint/test/typecheck in worktree |
-| Auto-commit | `swarm commit N [-m "msg"]` | Commit with conventional message |
-| Full pipeline | `swarm ship N` | check → commit → merge → push |
-| Batch ship | `swarm ship all` | Ship non-conflicting, report overlaps |
-| Enhanced dashboard | `swarm dash` | Changes, Tests, Health, summary line |
+| Brain-dump tasks | `cleet plan "t1" "t2" ...` | Batch-dispatch to all agents at once |
+| Code review | `cleet diff N [--stat\|--files]` | Review agent's changes vs main |
+| Commit history | `cleet log N` | Show agent's commits |
+| Quality checks | `cleet check N [--fix]` | Run lint/test/typecheck in worktree |
+| Auto-commit | `cleet commit N [-m "msg"]` | Commit with conventional message |
+| Full pipeline | `cleet ship N` | check → commit → merge → push |
+| Batch ship | `cleet ship all` | Ship non-conflicting, report overlaps |
+| Enhanced dashboard | `cleet dash` | Changes, Tests, Health, summary line |
 | Agent awareness | CLAUDE.md per worktree | File ownership context, conflict prevention |
 | Auto-check on idle | Stop hook | Runs checks automatically, plays notification |
 | Health signals | Dashboard | Green/yellow/red based on tokens vs output |
 
 ### Key Design Decisions
-- **Check config**: Auto-detect from package.json/Cargo.toml/etc., `.swarm.json` overrides
+- **Check config**: Auto-detect from package.json/Cargo.toml/etc., `.cleet.json` overrides
 - **Automation**: Auto-check + notify on idle. Ship is manual (intentional).
 - **Conflict prevention**: Agents are aware of each other via CLAUDE.md. File ownership tracked live. Conflicts detected at ship time.
 
@@ -280,12 +280,12 @@ Level 2 is still a terminal tool for developers. The path to non-developers:
 
 **Level 4 — Task-first, not agent-first:** User describes outcomes ("build me a landing page"), system decides how many agents to use and what each does. The orchestration is invisible. Target: anyone.
 
-**Key insight:** Each level is a wrapper around the previous one. Level 1 (`swarm` CLI) becomes the backend for Level 2 (orchestration). Level 2's task engine becomes the core of Level 3 (GUI). Nothing gets thrown away.
+**Key insight:** Each level is a wrapper around the previous one. Level 1 (`cleet` CLI) becomes the backend for Level 2 (orchestration). Level 2's task engine becomes the core of Level 3 (GUI). Nothing gets thrown away.
 
 ## Open Questions
 
 - How to handle agent-to-agent communication? Shared filesystem vs message passing?
-- Should agents be able to spawn sub-agents? (Recursive swarms)
+- Should agents be able to spawn sub-agents? (Recursive cleets)
 - What's the right default number of agents? (Hypothesis: 3-5 for most workflows)
-- Should the `swarm` CLI be a separate binary or stay as shell scripts?
+- Should the `cleet` CLI be a separate binary or stay as shell scripts?
 - How to detect when an agent is truly idle vs thinking?

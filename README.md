@@ -1,4 +1,4 @@
-# Swarm
+# Cleet
 
 Run multiple Claude Code agents in parallel. Each agent gets its own git worktree, its own task, and you can merge completed work back to main with one command.
 
@@ -14,12 +14,14 @@ Run multiple Claude Code agents in parallel. Each agent gets its own git worktre
 ## Install
 
 ```bash
-git clone https://github.com/AKhaliq-dev/swarm.git ~/swarm
-cd ~/swarm
-./bin/swarm setup
+git clone https://github.com/AKhaliq-dev/cleet.
+brew install tmux jq
+git ~/cleet
+cd ~/cleet
+./bin/cleet setup
 ```
 
-That's it. `setup` copies files to `~/.claude-swarm/`, installs a Claude Code hook, and symlinks `swarm` into your PATH.
+That's it. `setup` copies files to `~/.cleet/`, installs a Claude Code hook, and symlinks `cleet` into your PATH.
 
 **Requirements:** `tmux`, `jq`, `claude` CLI.
 
@@ -31,75 +33,75 @@ brew install tmux jq  # if needed
 
 ```bash
 # Launch 4 agents
-swarm up -n 4
+cleet up -n 4
 
 # Give them all tasks at once
-swarm plan \
+cleet plan \
   "Build JWT auth middleware" \
   "Create user CRUD API endpoints" \
   "Write integration tests" \
   "Add rate limiting"
 
 # Or assign individually
-swarm task 1 "build auth" --send
+cleet task 1 "build auth" --send
 
 # Review and ship
-swarm diff 1 --stat
-swarm check 1
-swarm ship 1          # check → commit → merge → push
+cleet diff 1 --stat
+cleet check 1
+cleet ship 1          # check → commit → merge → push
 
 # Ship everything that passes
-swarm ship all
+cleet ship all
 
 # Done
-swarm down
+cleet down
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `swarm setup` | Install (hooks, PATH symlink) |
-| `swarm up [-n NUM] [-d DIR] [--tabs]` | Launch N agents |
-| `swarm down` | Kill the session |
-| `swarm status` | Quick status of all agents |
-| `swarm plan "<t1>" "<t2>" ...` | Assign all tasks at once |
-| `swarm task <N> "<desc>" [--send]` | Assign task to one agent |
-| `swarm send <N> "<message>"` | Send message to agent N |
-| `swarm diff <N> [--stat\|--files]` | Review agent's changes |
-| `swarm diff all` | Summary of all agents |
-| `swarm log <N>` | Agent's commit history |
-| `swarm check <N> [--fix]` | Run lint/test/typecheck |
-| `swarm check all` | Check all agents |
-| `swarm commit <N> [-m "msg"]` | Commit agent's work |
-| `swarm ship <N>` | Full pipeline: check → commit → merge → push |
-| `swarm ship all` | Ship non-conflicting, report overlaps |
-| `swarm dash` | Live dashboard |
+| `cleet setup` | Install (hooks, PATH symlink) |
+| `cleet up [-n NUM] [-d DIR] [--tabs]` | Launch N agents |
+| `cleet down` | Kill the session |
+| `cleet status` | Quick status of all agents |
+| `cleet plan "<t1>" "<t2>" ...` | Assign all tasks at once |
+| `cleet task <N> "<desc>" [--send]` | Assign task to one agent |
+| `cleet send <N> "<message>"` | Send message to agent N |
+| `cleet diff <N> [--stat\|--files]` | Review agent's changes |
+| `cleet diff all` | Summary of all agents |
+| `cleet log <N>` | Agent's commit history |
+| `cleet check <N> [--fix]` | Run lint/test/typecheck |
+| `cleet check all` | Check all agents |
+| `cleet commit <N> [-m "msg"]` | Commit agent's work |
+| `cleet ship <N>` | Full pipeline: check → commit → merge → push |
+| `cleet ship all` | Ship non-conflicting, report overlaps |
+| `cleet dash` | Live dashboard |
 
 ## Layout
 
 **Grid (default)** — all agents visible in a tiled tmux grid. Best for 2-6 agents.
 
 ```bash
-swarm up -n 6
+cleet up -n 6
 ```
 
 **Tabs** — each agent in its own tmux window. Better for 7+ agents.
 
 ```bash
-swarm up -n 8 --tabs
+cleet up -n 8 --tabs
 ```
 
 ## How It Works
 
-- Each agent gets its own **git worktree** (isolated branch `swarm/agent-N`). No file conflicts during work.
+- Each agent gets its own **git worktree** (isolated branch `cleet/agent-N`). No file conflicts during work.
 - A **Stop hook** fires every time an agent finishes a turn — it tracks status, tokens, git stats, and runs checks automatically.
 - Agents get a **CLAUDE.md** with context about what other agents are working on and which files they own, updated live.
-- `swarm ship all` detects file overlaps between agents and ships non-conflicting ones first.
+- `cleet ship all` detects file overlaps between agents and ships non-conflicting ones first.
 
 ## Dashboard
 
-`swarm dash` shows a live table with status, changes, test results, token usage, and health signals.
+`cleet dash` shows a live table with status, changes, test results, token usage, and health signals.
 
 - **Green**: agent is productive
 - **Yellow**: done but tests fail, or high cost with no output
@@ -107,7 +109,7 @@ swarm up -n 8 --tabs
 
 ## Configuration
 
-Create `.swarm.json` in your project root to customize check commands:
+Create `.cleet.json` in your project root to customize check commands:
 
 ```json
 {
@@ -123,7 +125,7 @@ Without this, checks are auto-detected from `package.json`, `Cargo.toml`, `pypro
 ## Updating
 
 ```bash
-cd ~/swarm
+cd ~/cleet
 git pull
-./bin/swarm setup
+./bin/cleet setup
 ```

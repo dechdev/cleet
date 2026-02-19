@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# swarm-hook.sh — Claude Code Stop hook for status, cost, progress, and auto-check
+# cleet-hook.sh — Claude Code Stop hook for status, cost, progress, and auto-check
 # Triggered async on every Stop event. Receives JSON on stdin.
 # Writes agent status, token usage, git diff stats, file ownership, and check results.
 
-SWARM_DIR="$HOME/.claude-swarm"
-STATUS_DIR="$SWARM_DIR/status"
-COST_DIR="$SWARM_DIR/cost"
-TASKS_DIR="$SWARM_DIR/tasks"
-PROGRESS_DIR="$SWARM_DIR/progress"
-CHECKS_DIR="$SWARM_DIR/checks"
+CLEET_DIR="$HOME/.cleet"
+STATUS_DIR="$CLEET_DIR/status"
+COST_DIR="$CLEET_DIR/cost"
+TASKS_DIR="$CLEET_DIR/tasks"
+PROGRESS_DIR="$CLEET_DIR/progress"
+CHECKS_DIR="$CLEET_DIR/checks"
 
 # Read hook input from stdin
 input=$(cat)
 
 # Determine agent number
-agent_num="${SWARM_AGENT_NUM:-}"
+agent_num="${CLEET_AGENT_NUM:-}"
 
 # Fallback: parse from cwd path if using worktrees
 if [[ -z "$agent_num" ]]; then
@@ -34,8 +34,8 @@ mkdir -p "$STATUS_DIR" "$COST_DIR" "$PROGRESS_DIR" "$CHECKS_DIR"
 echo "idle" > "$STATUS_DIR/agent-$agent_num.status"
 
 # 2. Update pane title in grid mode
-session=$(cat "$SWARM_DIR/session" 2>/dev/null || true)
-layout=$(cat "$SWARM_DIR/layout" 2>/dev/null || true)
+session=$(cat "$CLEET_DIR/session" 2>/dev/null || true)
+layout=$(cat "$CLEET_DIR/layout" 2>/dev/null || true)
 if [[ "$layout" == "grid" ]] && [[ -n "$session" ]]; then
     task_slug="Agent $agent_num"
     if [[ -f "$TASKS_DIR/agent-$agent_num.task" ]]; then
@@ -43,8 +43,8 @@ if [[ "$layout" == "grid" ]] && [[ -n "$session" ]]; then
         slug=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
         task_slug="[$agent_num] $slug"
     fi
-    pane_base=$(cat "$SWARM_DIR/pane_base" 2>/dev/null || echo 0)
-    tmux select-pane -t "$session:swarm.$((agent_num - 1 + pane_base))" -T "$task_slug" 2>/dev/null || true
+    pane_base=$(cat "$CLEET_DIR/pane_base" 2>/dev/null || echo 0)
+    tmux select-pane -t "$session:cleet.$((agent_num - 1 + pane_base))" -T "$task_slug" 2>/dev/null || true
 fi
 
 # 3. Parse transcript for token usage (single jq pass over entire file)
@@ -65,7 +65,7 @@ if [[ -n "$transcript_path" ]] && [[ -f "$transcript_path" ]]; then
 fi
 
 # 4. Git diff stats + file ownership tracking
-work_dir=$(cat "$SWARM_DIR/workdir" 2>/dev/null || true)
+work_dir=$(cat "$CLEET_DIR/workdir" 2>/dev/null || true)
 wt_dir="$work_dir/.worktrees/agent-$agent_num"
 
 if [[ -n "$work_dir" ]] && [[ -d "$wt_dir" ]]; then
@@ -91,8 +91,8 @@ fi
 if [[ -n "$session" ]]; then
     target=""
     if [[ "$layout" == "grid" ]]; then
-        pane_base=$(cat "$SWARM_DIR/pane_base" 2>/dev/null || echo 0)
-        target="$session:swarm.$((agent_num - 1 + pane_base))"
+        pane_base=$(cat "$CLEET_DIR/pane_base" 2>/dev/null || echo 0)
+        target="$session:cleet.$((agent_num - 1 + pane_base))"
     else
         target="$session:agent-$agent_num"
     fi
@@ -104,9 +104,9 @@ if [[ -n "$work_dir" ]] && [[ -d "$wt_dir" ]]; then
     # Detect check commands
     checks=""
 
-    # .swarm.json override (check in main work_dir)
-    if [[ -f "$work_dir/.swarm.json" ]]; then
-        checks=$(jq -r '.checks[]? // empty' "$work_dir/.swarm.json" 2>/dev/null || true)
+    # .cleet.json override (check in main work_dir)
+    if [[ -f "$work_dir/.cleet.json" ]]; then
+        checks=$(jq -r '.checks[]? // empty' "$work_dir/.cleet.json" 2>/dev/null || true)
     fi
 
     # Auto-detect if no override
@@ -174,7 +174,7 @@ fi
 
 # 7. Regenerate CLAUDE.md for all agents with updated file ownership
 if [[ -n "$work_dir" ]] && [[ -d "$work_dir/.worktrees" ]]; then
-    num_agents=$(cat "$SWARM_DIR/num_agents" 2>/dev/null || echo 0)
+    num_agents=$(cat "$CLEET_DIR/num_agents" 2>/dev/null || echo 0)
 
     for i in $(seq 1 "$num_agents"); do
         iwt="$work_dir/.worktrees/agent-$i"
@@ -186,7 +186,7 @@ if [[ -n "$work_dir" ]] && [[ -d "$work_dir/.worktrees" ]]; then
         mkdir -p "$iwt/.claude"
 
         {
-            echo "# Swarm Context"
+            echo "# Cleet Context"
             echo ""
             echo "You are Agent $i. Your task: \"$task\""
             echo ""

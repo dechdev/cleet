@@ -123,8 +123,8 @@ function render(state) {
   if (!state || state.numAgents === 0) {
     grid.innerHTML = `
       <div class="empty-state">
-        <h2>No active swarm</h2>
-        <p>Run <code>swarm up -n N</code> to start agents, then <code>swarm dash</code></p>
+        <h2>No active cleet</h2>
+        <p>Run <code>cleet up -n N</code> to start agents, then <code>cleet dash</code></p>
       </div>
     `;
     sessionInfo.textContent = "";

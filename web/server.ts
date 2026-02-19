@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import { join, resolve, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readSwarmState, watchState } from "./state.js";
+import { readCleetState, watchState } from "./state.js";
 import * as actions from "./actions.js";
 
 const PORT = 7777;
@@ -106,7 +106,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
 
     // Send initial state immediately
     try {
-      const state = await readSwarmState();
+      const state = await readCleetState();
       res.write(`data: ${JSON.stringify(state)}\n\n`);
     } catch {}
     return;
@@ -115,7 +115,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   // State snapshot
   if (path === "/api/state" && method === "GET") {
     try {
-      const state = await readSwarmState();
+      const state = await readCleetState();
       json(res, 200, state);
     } catch (e) {
       json(res, 500, { ok: false, output: String(e) });
@@ -209,7 +209,7 @@ const stopWatch = watchState((state) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Swarm dashboard: http://${HOST}:${PORT}`);
+  console.log(`Cleet dashboard: http://${HOST}:${PORT}`);
 });
 
 // Graceful shutdown

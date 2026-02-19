@@ -2,23 +2,23 @@
 set -euo pipefail
 
 # ─── Constants ───
-SWARM_DIR="$HOME/.claude-swarm"
-SWARM_BIN="$SWARM_DIR/bin"
-SESSION_FILE="$SWARM_DIR/session"
-WORKDIR_FILE="$SWARM_DIR/workdir"
-LAYOUT_FILE="$SWARM_DIR/layout"
-NUM_AGENTS_FILE="$SWARM_DIR/num_agents"
-STATUS_DIR="$SWARM_DIR/status"
-COST_DIR="$SWARM_DIR/cost"
-TASKS_DIR="$SWARM_DIR/tasks"
-CHECKS_DIR="$SWARM_DIR/checks"
-PROGRESS_DIR="$SWARM_DIR/progress"
-PANE_BASE_FILE="$SWARM_DIR/pane_base"
+CLEET_DIR="$HOME/.cleet"
+CLEET_BIN="$CLEET_DIR/bin"
+SESSION_FILE="$CLEET_DIR/session"
+WORKDIR_FILE="$CLEET_DIR/workdir"
+LAYOUT_FILE="$CLEET_DIR/layout"
+NUM_AGENTS_FILE="$CLEET_DIR/num_agents"
+STATUS_DIR="$CLEET_DIR/status"
+COST_DIR="$CLEET_DIR/cost"
+TASKS_DIR="$CLEET_DIR/tasks"
+CHECKS_DIR="$CLEET_DIR/checks"
+PROGRESS_DIR="$CLEET_DIR/progress"
+PANE_BASE_FILE="$CLEET_DIR/pane_base"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 # ─── Defaults ───
 DEFAULT_NUM=3
-DEFAULT_SESSION="claude-swarm"
+DEFAULT_SESSION="cleet"
 
 # ─── Helpers ───
 die() { echo "Error: $*" >&2; exit 1; }
@@ -47,14 +47,14 @@ slugify() {
     echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//' | cut -c1-20
 }
 
-# Detect check commands from project files or .swarm.json
+# Detect check commands from project files or .cleet.json
 detect_checks() {
     local dir="$1"
 
-    # .swarm.json override
-    if [[ -f "$dir/.swarm.json" ]]; then
+    # .cleet.json override
+    if [[ -f "$dir/.cleet.json" ]]; then
         local checks
-        checks=$(jq -r '.checks[]? // empty' "$dir/.swarm.json" 2>/dev/null)
+        checks=$(jq -r '.checks[]? // empty' "$dir/.cleet.json" 2>/dev/null)
         if [[ -n "$checks" ]]; then
             echo "$checks"
             return 0
@@ -137,7 +137,7 @@ generate_claude_md() {
         mkdir -p "$wt_dir/.claude"
 
         {
-            echo "# Swarm Context"
+            echo "# Cleet Context"
             echo ""
             echo "You are Agent $i. Your task: \"$task\""
             echo ""
@@ -167,7 +167,7 @@ generate_claude_md() {
 }
 
 # Returns the tmux target string for a given agent number.
-# Grid mode: session:swarm.{pane_index}
+# Grid mode: session:cleet.{pane_index}
 # Tabs mode: session:{window_name}
 find_agent_target() {
     local agent_num="$1"
@@ -179,7 +179,7 @@ find_agent_target() {
     if [[ "$layout" == "grid" ]]; then
         local pane_base
         pane_base="$(get_pane_base)"
-        echo "$session:swarm.$((agent_num - 1 + pane_base))"
+        echo "$session:cleet.$((agent_num - 1 + pane_base))"
     else
         # Tabs mode: scan windows for agent-N or N-* pattern
         while IFS= read -r line; do
@@ -197,9 +197,9 @@ find_agent_target() {
 # ─── Usage ───
 usage() {
     cat <<'EOF'
-swarm — Multi-agent Claude workspace manager
+cleet — Multi-agent Claude workspace manager
 
-Usage: swarm <command> [options]
+Usage: cleet <command> [options]
 
 Commands:
   setup                       Install hooks and configure PATH
@@ -215,25 +215,25 @@ Commands:
   dash [term]                 Web dashboard (or 'term' for terminal)
   merge <N>                   Merge agent N's worktree branch
   status                      Quick status of all agents
-  down                        Kill the swarm session
+  down                        Kill the cleet session
 
 Options for 'up':
   -n, --num-agents NUM        Number of agents (1-10, default: 3)
   -d, --dir DIR               Working directory (default: cwd)
-  -s, --session NAME          tmux session name (default: claude-swarm)
+  -s, --session NAME          tmux session name (default: cleet)
   --tabs                      Use separate tmux windows instead of grid
   --headless                   Run headless + open web dashboard (default: tmux attach)
 
 Examples:
-  swarm setup                 # First-time install
-  swarm up -n 6               # 6 agents in a grid
-  swarm plan "auth" "api" "tests" "docs" "lint" "errors"
-  swarm diff 3 --stat         # File change summary for agent 3
-  swarm check all             # Run tests on all agents
-  swarm ship 1                # Full pipeline: check→commit→merge→push
-  swarm ship all              # Ship all non-conflicting agents
-  swarm dash                  # Enhanced dashboard with health
-  swarm down                  # Kill session
+  cleet setup                 # First-time install
+  cleet up -n 6               # 6 agents in a grid
+  cleet plan "auth" "api" "tests" "docs" "lint" "errors"
+  cleet diff 3 --stat         # File change summary for agent 3
+  cleet check all             # Run tests on all agents
+  cleet ship 1                # Full pipeline: check→commit→merge→push
+  cleet ship all              # Ship all non-conflicting agents
+  cleet dash                  # Enhanced dashboard with health
+  cleet down                  # Kill session
 EOF
     exit 0
 }
@@ -244,7 +244,7 @@ EOF
 
 # ─── setup ───
 cmd_setup() {
-    echo "Setting up swarm..."
+    echo "Setting up cleet..."
 
     # Check dependencies
     command -v jq &>/dev/null || die "jq is required. Install with: brew install jq"
@@ -268,28 +268,28 @@ cmd_setup() {
     repo_dir="$(cd "$(dirname "$self_path")/.." && pwd -P)"
 
     # Create directory structure
-    mkdir -p "$SWARM_BIN" "$STATUS_DIR" "$COST_DIR" "$TASKS_DIR" "$CHECKS_DIR" "$PROGRESS_DIR"
+    mkdir -p "$CLEET_BIN" "$STATUS_DIR" "$COST_DIR" "$TASKS_DIR" "$CHECKS_DIR" "$PROGRESS_DIR"
 
-    # Copy bin files from repo to ~/.claude-swarm/bin/
-    if [[ -f "$repo_dir/bin/swarm" ]]; then
-        cp "$repo_dir/bin/swarm" "$SWARM_BIN/swarm"
-        chmod +x "$SWARM_BIN/swarm"
-        echo "  Installed bin/swarm"
+    # Copy bin files from repo to ~/.cleet/bin/
+    if [[ -f "$repo_dir/bin/cleet" ]]; then
+        cp "$repo_dir/bin/cleet" "$CLEET_BIN/cleet"
+        chmod +x "$CLEET_BIN/cleet"
+        echo "  Installed bin/cleet"
     fi
-    if [[ -f "$repo_dir/bin/swarm-hook.sh" ]]; then
-        cp "$repo_dir/bin/swarm-hook.sh" "$SWARM_BIN/swarm-hook.sh"
-        chmod +x "$SWARM_BIN/swarm-hook.sh"
-        echo "  Installed bin/swarm-hook.sh"
+    if [[ -f "$repo_dir/bin/cleet-hook.sh" ]]; then
+        cp "$repo_dir/bin/cleet-hook.sh" "$CLEET_BIN/cleet-hook.sh"
+        chmod +x "$CLEET_BIN/cleet-hook.sh"
+        echo "  Installed bin/cleet-hook.sh"
     fi
 
-    # Copy web files from repo to ~/.claude-swarm/web/
+    # Copy web files from repo to ~/.cleet/web/
     if [[ -d "$repo_dir/web" ]]; then
-        mkdir -p "$SWARM_DIR/web/public"
+        mkdir -p "$CLEET_DIR/web/public"
         for f in server.ts state.ts actions.ts package.json package-lock.json; do
-            [[ -f "$repo_dir/web/$f" ]] && cp "$repo_dir/web/$f" "$SWARM_DIR/web/$f"
+            [[ -f "$repo_dir/web/$f" ]] && cp "$repo_dir/web/$f" "$CLEET_DIR/web/$f"
         done
         for f in index.html style.css app.js; do
-            [[ -f "$repo_dir/web/public/$f" ]] && cp "$repo_dir/web/public/$f" "$SWARM_DIR/web/public/$f"
+            [[ -f "$repo_dir/web/public/$f" ]] && cp "$repo_dir/web/public/$f" "$CLEET_DIR/web/public/$f"
         done
         echo "  Installed web dashboard"
     fi
@@ -298,7 +298,7 @@ cmd_setup() {
     mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
 
     # Merge Stop hook into settings.json
-    local hook_cmd="$SWARM_BIN/swarm-hook.sh"
+    local hook_cmd="$CLEET_BIN/cleet-hook.sh"
     local new_hook
     new_hook=$(jq -n --arg cmd "$hook_cmd" '{
         "hooks": [
@@ -325,26 +325,26 @@ cmd_setup() {
         echo "  Created $CLAUDE_SETTINGS with Stop hook"
     fi
 
-    # Symlink swarm into PATH
+    # Symlink cleet into PATH
     local link_target=""
     if [[ -d "$HOME/.local/bin" ]]; then
-        link_target="$HOME/.local/bin/swarm"
+        link_target="$HOME/.local/bin/cleet"
     elif [[ -d "/usr/local/bin" ]]; then
-        link_target="/usr/local/bin/swarm"
+        link_target="/usr/local/bin/cleet"
     else
         mkdir -p "$HOME/.local/bin"
-        link_target="$HOME/.local/bin/swarm"
+        link_target="$HOME/.local/bin/cleet"
         echo "  Created ~/.local/bin/ — add it to your PATH if needed"
     fi
 
     if [[ -L "$link_target" ]] || [[ -e "$link_target" ]]; then
         rm -f "$link_target"
     fi
-    ln -s "$SWARM_BIN/swarm" "$link_target"
-    echo "  Symlinked swarm → $link_target"
+    ln -s "$CLEET_BIN/cleet" "$link_target"
+    echo "  Symlinked cleet → $link_target"
 
     echo ""
-    echo "Setup complete. Run 'swarm up' to launch agents."
+    echo "Setup complete. Run 'cleet up' to launch agents."
 }
 
 # ─── up ───
@@ -362,7 +362,7 @@ cmd_up() {
             -s|--session) [[ $# -ge 2 ]] || die "-s requires a value"; session="$2"; shift 2 ;;
             --tabs) layout="tabs"; shift ;;
             --headless) attach_mode=false; shift ;;
-            -*)  die "Unknown option '$1'. Run 'swarm --help'." ;;
+            -*)  die "Unknown option '$1'. Run 'cleet --help'." ;;
             *)
                 if [[ "$1" =~ ^[0-9]+$ ]]; then
                     num_agents="$1"
@@ -434,7 +434,7 @@ cmd_up() {
 
         for i in $(seq 1 "$num_agents"); do
             local wt_dir="$work_dir/.worktrees/agent-$i"
-            local branch="swarm/agent-$i"
+            local branch="cleet/agent-$i"
 
             [[ -d "$wt_dir" ]] && continue
 
@@ -471,7 +471,7 @@ cmd_up() {
     if [[ "$layout" == "grid" ]]; then
         local pane_base
         pane_base="$(get_pane_base)"
-        tmux select-pane -t "$session:swarm.$pane_base"
+        tmux select-pane -t "$session:cleet.$pane_base"
     else
         tmux select-window -t "$session:agent-1"
     fi
@@ -481,7 +481,7 @@ cmd_up() {
         cat << 'EOF'
 
 ╔══════════════════════════════════════════════════════════════╗
-║                  Swarm Command Center (Grid)                 ║
+║                  Cleet Command Center (Grid)                 ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ║  NAVIGATE                                                    ║
@@ -494,13 +494,13 @@ cmd_up() {
 ║                                                              ║
 ║  MANAGE (from another terminal)                              ║
 ║  ──────                                                      ║
-║  swarm plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
-║  swarm send 2 "run tests"        Send message               ║
-║  swarm dash                       Dashboard with health     ║
-║  swarm diff 3 --stat              Review agent's changes    ║
-║  swarm check all                  Run tests on all agents   ║
-║  swarm ship 1                     Check→commit→merge→push   ║
-║  swarm down                       Kill session              ║
+║  cleet plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
+║  cleet send 2 "run tests"        Send message               ║
+║  cleet dash                       Dashboard with health     ║
+║  cleet diff 3 --stat              Review agent's changes    ║
+║  cleet check all                  Run tests on all agents   ║
+║  cleet ship 1                     Check→commit→merge→push   ║
+║  cleet down                       Kill session              ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 
@@ -509,7 +509,7 @@ EOF
         cat << 'EOF'
 
 ╔══════════════════════════════════════════════════════════════╗
-║                 Swarm Command Center (Tabs)                  ║
+║                 Cleet Command Center (Tabs)                  ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
 ║  SWITCH AGENTS                                               ║
@@ -519,13 +519,13 @@ EOF
 ║                                                              ║
 ║  MANAGE (from another terminal)                              ║
 ║  ──────                                                      ║
-║  swarm plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
-║  swarm send 2 "run tests"        Send message               ║
-║  swarm dash                       Dashboard with health     ║
-║  swarm diff 3 --stat              Review agent's changes    ║
-║  swarm check all                  Run tests on all agents   ║
-║  swarm ship 1                     Check→commit→merge→push   ║
-║  swarm down                       Kill session              ║
+║  cleet plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
+║  cleet send 2 "run tests"        Send message               ║
+║  cleet dash                       Dashboard with health     ║
+║  cleet diff 3 --stat              Review agent's changes    ║
+║  cleet check all                  Run tests on all agents   ║
+║  cleet ship 1                     Check→commit→merge→push   ║
+║  cleet down                       Kill session              ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
 
@@ -533,7 +533,7 @@ EOF
     fi
 
     if [[ "$use_worktrees" == true ]]; then
-        echo "  Agents have isolated git worktrees. Use 'swarm merge <N>' to merge."
+        echo "  Agents have isolated git worktrees. Use 'cleet merge <N>' to merge."
     fi
     echo "  Launching $num_agents agents in $layout mode..."
     echo ""
@@ -554,12 +554,12 @@ _up_grid() {
     # because tmux server may not be running yet (no .tmux.conf loaded)
     local dir1
     dir1="$(agent_dir 1)"
-    tmux new-session -d -s "$session" -n "swarm" -c "$dir1"
+    tmux new-session -d -s "$session" -n "cleet" -c "$dir1"
 
-    # Disable automatic-rename IMMEDIATELY — tmux will rename "swarm" to "bash"/"zsh"
+    # Disable automatic-rename IMMEDIATELY — tmux will rename "cleet" to "bash"/"zsh"
     # before split-window can target it by name, causing splits to silently fail
     tmux set-option -t "$session" allow-rename off
-    tmux set-window-option -t "$session:swarm" automatic-rename off
+    tmux set-window-option -t "$session:cleet" automatic-rename off
 
     # NOW query pane base index (server is running, .tmux.conf is loaded)
     local pane_base
@@ -567,23 +567,23 @@ _up_grid() {
     [[ -n "$pane_base" ]] || pane_base=0
     echo "$pane_base" > "$PANE_BASE_FILE"
 
-    tmux send-keys -t "$session:swarm.$pane_base" "export SWARM_AGENT_NUM=1 && claude" Enter
+    tmux send-keys -t "$session:cleet.$pane_base" "export CLEET_AGENT_NUM=1 && claude" Enter
 
     # Additional panes
     for i in $(seq 2 "$num"); do
         local dir_i
         dir_i="$(agent_dir "$i")"
-        if ! tmux split-window -t "$session:swarm" -c "$dir_i"; then
+        if ! tmux split-window -t "$session:cleet" -c "$dir_i"; then
             echo "Warning: terminal too small for $num panes. Created $((i-1)) agents."
             echo "$((i-1))" > "$NUM_AGENTS_FILE"
             break
         fi
-        tmux select-layout -t "$session:swarm" tiled
-        tmux send-keys -t "$session:swarm.$((i - 1 + pane_base))" "export SWARM_AGENT_NUM=$i && claude" Enter
+        tmux select-layout -t "$session:cleet" tiled
+        tmux send-keys -t "$session:cleet.$((i - 1 + pane_base))" "export CLEET_AGENT_NUM=$i && claude" Enter
     done
 
     # Final tiled layout
-    tmux select-layout -t "$session:swarm" tiled
+    tmux select-layout -t "$session:cleet" tiled
 
     # Pane borders with titles (use @agent_title user option so Claude can't overwrite it)
     tmux set-option -t "$session" pane-border-status top
@@ -593,7 +593,7 @@ _up_grid() {
 
     # Set initial pane titles via user option (immune to app escape sequences)
     for i in $(seq 1 "$num"); do
-        tmux set-option -p -t "$session:swarm.$((i - 1 + pane_base))" @agent_title "Agent $i" 2>/dev/null || true
+        tmux set-option -p -t "$session:cleet.$((i - 1 + pane_base))" @agent_title "Agent $i" 2>/dev/null || true
     done
 
     # Mouse support (click to select pane, scroll)
@@ -601,9 +601,9 @@ _up_grid() {
 
     # Status bar
     tmux set-option -t "$session" status-style "bg=#1c1c1c,fg=#808080"
-    tmux set-option -t "$session" status-left "#[fg=#5f87ff,bold] SWARM #[fg=#555555]| "
+    tmux set-option -t "$session" status-left "#[fg=#5f87ff,bold] CLEET #[fg=#555555]| "
     tmux set-option -t "$session" status-left-length 20
-    tmux set-option -t "$session" status-right "#($SWARM_BIN/swarm _status_bar) #[fg=#555555]| #[fg=#808080]%H:%M "
+    tmux set-option -t "$session" status-right "#($CLEET_BIN/cleet _status_bar) #[fg=#555555]| #[fg=#808080]%H:%M "
     tmux set-option -t "$session" status-right-length 80
     tmux set-option -t "$session" status-interval 5
 }
@@ -617,10 +617,10 @@ _up_tabs() {
         dir_i="$(agent_dir "$i")"
         if [[ "$i" -eq 1 ]]; then
             tmux new-session -d -s "$session" -n "agent-1" -c "$dir_i"
-            tmux send-keys -t "$session:agent-1" "export SWARM_AGENT_NUM=1 && claude" Enter
+            tmux send-keys -t "$session:agent-1" "export CLEET_AGENT_NUM=1 && claude" Enter
         else
             tmux new-window -t "$session" -n "agent-$i" -c "$dir_i"
-            tmux send-keys -t "$session:agent-$i" "export SWARM_AGENT_NUM=$i && claude" Enter
+            tmux send-keys -t "$session:agent-$i" "export CLEET_AGENT_NUM=$i && claude" Enter
         fi
     done
 
@@ -629,14 +629,14 @@ _up_tabs() {
     tmux set-window-option -t "$session" automatic-rename off
 
     # Status bar
-    tmux set-option -t "$session" status-right "#($SWARM_BIN/swarm _status_bar) | %H:%M "
+    tmux set-option -t "$session" status-right "#($CLEET_BIN/cleet _status_bar) | %H:%M "
     tmux set-option -t "$session" status-right-length 80
     tmux set-option -t "$session" status-interval 5
 }
 
 # ─── task ───
 cmd_task() {
-    [[ $# -ge 2 ]] || die "Usage: swarm task <agent-num> \"<description>\" [--send]"
+    [[ $# -ge 2 ]] || die "Usage: cleet task <agent-num> \"<description>\" [--send]"
 
     local agent_num="$1"
     local description="$2"
@@ -686,7 +686,7 @@ cmd_task() {
 
 # ─── send ───
 cmd_send() {
-    [[ $# -ge 2 ]] || die "Usage: swarm send <agent-num> \"<message>\""
+    [[ $# -ge 2 ]] || die "Usage: cleet send <agent-num> \"<message>\""
 
     local agent_num="$1"
     local message="$2"
@@ -723,7 +723,7 @@ cmd_plan() {
         done < "$file"
     fi
 
-    [[ ${#tasks[@]} -gt 0 ]] || die "Usage: swarm plan \"<task1>\" \"<task2>\" ... [--file tasks.md]"
+    [[ ${#tasks[@]} -gt 0 ]] || die "Usage: cleet plan \"<task1>\" \"<task2>\" ... [--file tasks.md]"
 
     local num_agents
     num_agents="$(get_num_agents)"
@@ -732,7 +732,7 @@ cmd_plan() {
     local work_dir
     work_dir="$(get_workdir)"
 
-    tmux has-session -t "$session" 2>/dev/null || die "No active swarm session '$session'"
+    tmux has-session -t "$session" 2>/dev/null || die "No active cleet session '$session'"
 
     if [[ ${#tasks[@]} -gt "$num_agents" ]]; then
         echo "Warning: ${#tasks[@]} tasks but only $num_agents agents. Extra tasks will be skipped."
@@ -761,7 +761,7 @@ cmd_plan() {
 
 # ─── diff ───
 cmd_diff() {
-    [[ $# -ge 1 ]] || die "Usage: swarm diff <N|all> [--stat|--files]"
+    [[ $# -ge 1 ]] || die "Usage: cleet diff <N|all> [--stat|--files]"
 
     local target="$1"
     shift
@@ -822,7 +822,7 @@ cmd_diff() {
 
 # ─── log ───
 cmd_log() {
-    [[ $# -ge 1 ]] || die "Usage: swarm log <N>"
+    [[ $# -ge 1 ]] || die "Usage: cleet log <N>"
 
     local agent_num="$1"
     [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
@@ -838,7 +838,7 @@ cmd_log() {
 
 # ─── check ───
 cmd_check() {
-    [[ $# -ge 1 ]] || die "Usage: swarm check <N|all> [--fix]"
+    [[ $# -ge 1 ]] || die "Usage: cleet check <N|all> [--fix]"
 
     local target="$1"
     shift
@@ -885,7 +885,7 @@ _run_checks() {
     fi
 
     if [[ -z "$checks" ]]; then
-        echo "Agent $agent_num: no check commands detected. Add .swarm.json or a standard build config."
+        echo "Agent $agent_num: no check commands detected. Add .cleet.json or a standard build config."
         return 1
     fi
 
@@ -961,7 +961,7 @@ _run_checks() {
 
 # ─── commit ───
 cmd_commit() {
-    [[ $# -ge 1 ]] || die "Usage: swarm commit <N> [-m \"message\"]"
+    [[ $# -ge 1 ]] || die "Usage: cleet commit <N> [-m \"message\"]"
 
     local agent_num="$1"
     shift
@@ -989,9 +989,9 @@ cmd_commit() {
         if [[ -n "$task" ]]; then
             # Generate conventional commit prefix
             local prefix="feat"
-            if [[ -f "$work_dir/.swarm.json" ]]; then
+            if [[ -f "$work_dir/.cleet.json" ]]; then
                 local cfg_prefix
-                cfg_prefix=$(jq -r '.commit_prefix // empty' "$work_dir/.swarm.json" 2>/dev/null)
+                cfg_prefix=$(jq -r '.commit_prefix // empty' "$work_dir/.cleet.json" 2>/dev/null)
                 [[ -n "$cfg_prefix" ]] && prefix="$cfg_prefix"
             fi
 
@@ -1020,7 +1020,7 @@ cmd_commit() {
 
 # ─── ship ───
 cmd_ship() {
-    [[ $# -ge 1 ]] || die "Usage: swarm ship <N|all>"
+    [[ $# -ge 1 ]] || die "Usage: cleet ship <N|all>"
 
     local target="$1"
     shift
@@ -1070,7 +1070,7 @@ _ship_one() {
 
     # 3. Merge
     echo "Step 3: Merging..."
-    local branch="swarm/agent-$agent_num"
+    local branch="cleet/agent-$agent_num"
     local current
     current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
     git -C "$work_dir" merge "$branch" --no-edit
@@ -1080,10 +1080,10 @@ _ship_one() {
     echo "Step 4: Pushing..."
     local remote="origin"
     local push_branch="$current"
-    if [[ -f "$work_dir/.swarm.json" ]]; then
+    if [[ -f "$work_dir/.cleet.json" ]]; then
         local cfg_remote cfg_branch
-        cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.swarm.json" 2>/dev/null)
-        cfg_branch=$(jq -r '.push_branch // empty' "$work_dir/.swarm.json" 2>/dev/null)
+        cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.cleet.json" 2>/dev/null)
+        cfg_branch=$(jq -r '.push_branch // empty' "$work_dir/.cleet.json" 2>/dev/null)
         [[ -n "$cfg_remote" ]] && remote="$cfg_remote"
         [[ -n "$cfg_branch" ]] && push_branch="$cfg_branch"
     fi
@@ -1209,7 +1209,7 @@ _ship_all() {
     for i in "${shippable[@]}"; do
         echo "── Shipping agent $i ──"
         cmd_commit "$i"
-        local branch="swarm/agent-$i"
+        local branch="cleet/agent-$i"
         git -C "$work_dir" merge "$branch" --no-edit
         echo "  Merged $branch"
     done
@@ -1219,9 +1219,9 @@ _ship_all() {
         local current
         current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
         local remote="origin"
-        if [[ -f "$work_dir/.swarm.json" ]]; then
+        if [[ -f "$work_dir/.cleet.json" ]]; then
             local cfg_remote
-            cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.swarm.json" 2>/dev/null)
+            cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.cleet.json" 2>/dev/null)
             [[ -n "$cfg_remote" ]] && remote="$cfg_remote"
         fi
         git -C "$work_dir" push "$remote" "$current"
@@ -1239,7 +1239,7 @@ cmd_dash() {
     session="$(get_session)"
     local mode="${1:-web}"
 
-    tmux has-session -t "$session" 2>/dev/null || die "No active swarm session '$session'"
+    tmux has-session -t "$session" 2>/dev/null || die "No active cleet session '$session'"
 
     # Recover state files if missing (e.g., after manual cleanup)
     if [[ ! -f "$NUM_AGENTS_FILE" ]]; then
@@ -1260,16 +1260,16 @@ cmd_dash() {
     if [[ "$mode" == "term" || "$mode" == "terminal" ]]; then
         # Terminal dashboard (original)
         if [[ -n "${TMUX:-}" ]]; then
-            tmux new-window -t "$session" -n "dashboard" "$SWARM_BIN/swarm _dash_loop"
+            tmux new-window -t "$session" -n "dashboard" "$CLEET_BIN/cleet _dash_loop"
         else
-            "$SWARM_BIN/swarm" _dash_loop
+            "$CLEET_BIN/cleet" _dash_loop
         fi
         return
     fi
 
     # Web dashboard
-    local web_dir="$SWARM_DIR/web"
-    local pid_file="$SWARM_DIR/web.pid"
+    local web_dir="$CLEET_DIR/web"
+    local pid_file="$CLEET_DIR/web.pid"
 
     # Check if already running
     if [[ -f "$pid_file" ]]; then
@@ -1455,7 +1455,7 @@ cmd_dash_loop() {
 
 # ─── merge ───
 cmd_merge() {
-    [[ $# -ge 1 ]] || die "Usage: swarm merge <agent-num>"
+    [[ $# -ge 1 ]] || die "Usage: cleet merge <agent-num>"
 
     local agent_num="$1"
     [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
@@ -1464,9 +1464,9 @@ cmd_merge() {
     work_dir="$(get_workdir)"
 
     local wt_dir="$work_dir/.worktrees/agent-$agent_num"
-    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num. Worktrees only exist when 'swarm up' runs in a git repo."
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num. Worktrees only exist when 'cleet up' runs in a git repo."
 
-    local branch="swarm/agent-$agent_num"
+    local branch="cleet/agent-$agent_num"
     local current
     current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
 
@@ -1489,7 +1489,7 @@ cmd_down() {
     work_dir="$(get_workdir)"
 
     # Kill web dashboard if running
-    local pid_file="$SWARM_DIR/web.pid"
+    local pid_file="$CLEET_DIR/web.pid"
     if [[ -f "$pid_file" ]]; then
         local pid
         pid="$(cat "$pid_file")"
@@ -1524,7 +1524,7 @@ cmd_status() {
     num_agents="$(get_num_agents)"
 
     if ! tmux has-session -t "$session" 2>/dev/null; then
-        echo "No active swarm session."
+        echo "No active cleet session."
         return 0
     fi
 
@@ -1599,5 +1599,5 @@ case "$1" in
     down)        shift; cmd_down "$@" ;;
     status)      shift; cmd_status "$@" ;;
     -h|--help|help) usage ;;
-    *)           die "Unknown command '$1'. Run 'swarm --help'." ;;
+    *)           die "Unknown command '$1'. Run 'cleet --help'." ;;
 esac
