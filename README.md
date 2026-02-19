@@ -14,9 +14,8 @@ Run multiple Claude Code agents in parallel. Each agent gets its own git worktre
 ## Install
 
 ```bash
-git clone https://github.com/AKhaliq-dev/cleet.
+git clone git@github.com:dechdev/cleet.git
 brew install tmux jq
-git ~/cleet
 cd ~/cleet
 ./bin/cleet setup
 ```
