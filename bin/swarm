@@ -1,0 +1,1603 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── Constants ───
+SWARM_DIR="$HOME/.claude-swarm"
+SWARM_BIN="$SWARM_DIR/bin"
+SESSION_FILE="$SWARM_DIR/session"
+WORKDIR_FILE="$SWARM_DIR/workdir"
+LAYOUT_FILE="$SWARM_DIR/layout"
+NUM_AGENTS_FILE="$SWARM_DIR/num_agents"
+STATUS_DIR="$SWARM_DIR/status"
+COST_DIR="$SWARM_DIR/cost"
+TASKS_DIR="$SWARM_DIR/tasks"
+CHECKS_DIR="$SWARM_DIR/checks"
+PROGRESS_DIR="$SWARM_DIR/progress"
+PANE_BASE_FILE="$SWARM_DIR/pane_base"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+
+# ─── Defaults ───
+DEFAULT_NUM=3
+DEFAULT_SESSION="claude-swarm"
+
+# ─── Helpers ───
+die() { echo "Error: $*" >&2; exit 1; }
+
+get_session() {
+    [[ -f "$SESSION_FILE" ]] && cat "$SESSION_FILE" || echo "$DEFAULT_SESSION"
+}
+
+get_workdir() {
+    [[ -f "$WORKDIR_FILE" ]] && cat "$WORKDIR_FILE" || pwd
+}
+
+get_layout() {
+    [[ -f "$LAYOUT_FILE" ]] && cat "$LAYOUT_FILE" || echo "grid"
+}
+
+get_num_agents() {
+    [[ -f "$NUM_AGENTS_FILE" ]] && cat "$NUM_AGENTS_FILE" || echo "0"
+}
+
+get_pane_base() {
+    [[ -f "$PANE_BASE_FILE" ]] && cat "$PANE_BASE_FILE" || echo "0"
+}
+
+slugify() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//' | cut -c1-20
+}
+
+# Detect check commands from project files or .swarm.json
+detect_checks() {
+    local dir="$1"
+
+    # .swarm.json override
+    if [[ -f "$dir/.swarm.json" ]]; then
+        local checks
+        checks=$(jq -r '.checks[]? // empty' "$dir/.swarm.json" 2>/dev/null)
+        if [[ -n "$checks" ]]; then
+            echo "$checks"
+            return 0
+        fi
+    fi
+
+    # Auto-detect from project files
+    if [[ -f "$dir/package.json" ]]; then
+        # Check if scripts.test exists
+        if jq -e '.scripts.lint' "$dir/package.json" &>/dev/null; then
+            echo "npm run lint"
+        fi
+        if jq -e '.scripts.test' "$dir/package.json" &>/dev/null; then
+            echo "npm test"
+        fi
+        if jq -e '.scripts.typecheck' "$dir/package.json" &>/dev/null; then
+            echo "npm run typecheck"
+        fi
+        return 0
+    fi
+
+    if [[ -f "$dir/Cargo.toml" ]]; then
+        echo "cargo test"
+        return 0
+    fi
+
+    if [[ -f "$dir/pyproject.toml" ]] || [[ -f "$dir/setup.py" ]]; then
+        echo "pytest"
+        return 0
+    fi
+
+    if [[ -f "$dir/Makefile" ]]; then
+        if grep -q '^test:' "$dir/Makefile"; then
+            echo "make test"
+        fi
+        return 0
+    fi
+
+    if [[ -f "$dir/go.mod" ]]; then
+        echo "go test ./..."
+        return 0
+    fi
+
+    return 1
+}
+
+# Get git diff stats for an agent's worktree
+get_agent_diff_stats() {
+    local work_dir="$1"
+    local agent_num="$2"
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || return 1
+
+    local files_changed=0 insertions=0 deletions=0
+    local stat_line
+    stat_line=$(git -C "$wt_dir" diff --stat main 2>/dev/null | tail -1)
+    if [[ -n "$stat_line" ]]; then
+        files_changed=$(echo "$stat_line" | grep -o '[0-9]* file' | grep -o '[0-9]*' || echo 0)
+        insertions=$(echo "$stat_line" | grep -o '[0-9]* insertion' | grep -o '[0-9]*' || echo 0)
+        deletions=$(echo "$stat_line" | grep -o '[0-9]* deletion' | grep -o '[0-9]*' || echo 0)
+    fi
+    echo "${files_changed:-0} ${insertions:-0} ${deletions:-0}"
+}
+
+# Generate CLAUDE.md for all agent worktrees with task context + file ownership
+generate_claude_md() {
+    local work_dir="$1"
+    local num_agents
+    num_agents="$(get_num_agents)"
+
+    [[ -d "$work_dir/.worktrees" ]] || return 0
+
+    for i in $(seq 1 "$num_agents"); do
+        local wt_dir="$work_dir/.worktrees/agent-$i"
+        [[ -d "$wt_dir" ]] || continue
+
+        local task="-"
+        [[ -f "$TASKS_DIR/agent-$i.task" ]] && task=$(head -1 "$TASKS_DIR/agent-$i.task")
+
+        mkdir -p "$wt_dir/.claude"
+
+        {
+            echo "# Swarm Context"
+            echo ""
+            echo "You are Agent $i. Your task: \"$task\""
+            echo ""
+            echo "## Other agents are working on:"
+
+            for j in $(seq 1 "$num_agents"); do
+                [[ "$j" -eq "$i" ]] && continue
+                local other_task="-"
+                [[ -f "$TASKS_DIR/agent-$j.task" ]] && other_task=$(head -1 "$TASKS_DIR/agent-$j.task")
+
+                local files_info=""
+                if [[ -f "$PROGRESS_DIR/agent-$j.files" ]]; then
+                    local file_list
+                    file_list=$(head -20 "$PROGRESS_DIR/agent-$j.files" | tr '\n' ', ' | sed 's/,$//')
+                    [[ -n "$file_list" ]] && files_info=" — modifying: $file_list"
+                fi
+                echo "- Agent $j: \"$other_task\"$files_info"
+            done
+
+            echo ""
+            echo "## Rules"
+            echo "- Do NOT modify files listed above unless absolutely necessary"
+            echo "- If you need changes to another agent's files, note it as a TODO instead"
+            echo "- Create new files rather than editing shared ones when possible"
+        } > "$wt_dir/.claude/CLAUDE.md"
+    done
+}
+
+# Returns the tmux target string for a given agent number.
+# Grid mode: session:swarm.{pane_index}
+# Tabs mode: session:{window_name}
+find_agent_target() {
+    local agent_num="$1"
+    local session
+    session="$(get_session)"
+    local layout
+    layout="$(get_layout)"
+
+    if [[ "$layout" == "grid" ]]; then
+        local pane_base
+        pane_base="$(get_pane_base)"
+        echo "$session:swarm.$((agent_num - 1 + pane_base))"
+    else
+        # Tabs mode: scan windows for agent-N or N-* pattern
+        while IFS= read -r line; do
+            local win_name
+            win_name=$(echo "$line" | awk '{print $2}')
+            if [[ "$win_name" == "agent-$agent_num" ]] || [[ "$win_name" =~ ^${agent_num}- ]]; then
+                echo "$session:$win_name"
+                return 0
+            fi
+        done < <(tmux list-windows -t "$session" -F "#{window_index} #{window_name}" 2>/dev/null || true)
+        return 1
+    fi
+}
+
+# ─── Usage ───
+usage() {
+    cat <<'EOF'
+swarm — Multi-agent Claude workspace manager
+
+Usage: swarm <command> [options]
+
+Commands:
+  setup                       Install hooks and configure PATH
+  up [-n NUM] [-d DIR] [-s S] Launch N agents in tmux
+  task <N> "<desc>" [--send]  Assign a task to agent N
+  send <N> "<message>"        Send a message to agent N
+  plan "<t1>" "<t2>" ...      Batch-dispatch tasks to all agents
+  diff <N|all> [--stat|--files] Show agent's changes vs main
+  log <N>                     Show agent's commit history
+  check <N|all> [--fix]       Run quality checks in agent worktree
+  commit <N> [-m "msg"]       Commit agent's current work
+  ship <N|all>                Check → commit → merge → push
+  dash [term]                 Web dashboard (or 'term' for terminal)
+  merge <N>                   Merge agent N's worktree branch
+  status                      Quick status of all agents
+  down                        Kill the swarm session
+
+Options for 'up':
+  -n, --num-agents NUM        Number of agents (1-10, default: 3)
+  -d, --dir DIR               Working directory (default: cwd)
+  -s, --session NAME          tmux session name (default: claude-swarm)
+  --tabs                      Use separate tmux windows instead of grid
+  --headless                   Run headless + open web dashboard (default: tmux attach)
+
+Examples:
+  swarm setup                 # First-time install
+  swarm up -n 6               # 6 agents in a grid
+  swarm plan "auth" "api" "tests" "docs" "lint" "errors"
+  swarm diff 3 --stat         # File change summary for agent 3
+  swarm check all             # Run tests on all agents
+  swarm ship 1                # Full pipeline: check→commit→merge→push
+  swarm ship all              # Ship all non-conflicting agents
+  swarm dash                  # Enhanced dashboard with health
+  swarm down                  # Kill session
+EOF
+    exit 0
+}
+
+# ═══════════════════════════════════════════════════════════
+# SUBCOMMANDS
+# ═══════════════════════════════════════════════════════════
+
+# ─── setup ───
+cmd_setup() {
+    echo "Setting up swarm..."
+
+    # Check dependencies
+    command -v jq &>/dev/null || die "jq is required. Install with: brew install jq"
+    command -v tmux &>/dev/null || die "tmux is required. Install with: brew install tmux"
+    command -v claude &>/dev/null || die "claude CLI is required."
+
+    # Detect repo directory (where this script lives)
+    local self_path
+    self_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+    # Resolve symlinks
+    while [[ -L "$self_path" ]]; do
+        local link_target
+        link_target="$(readlink "$self_path")"
+        if [[ "$link_target" == /* ]]; then
+            self_path="$link_target"
+        else
+            self_path="$(dirname "$self_path")/$link_target"
+        fi
+    done
+    local repo_dir
+    repo_dir="$(cd "$(dirname "$self_path")/.." && pwd -P)"
+
+    # Create directory structure
+    mkdir -p "$SWARM_BIN" "$STATUS_DIR" "$COST_DIR" "$TASKS_DIR" "$CHECKS_DIR" "$PROGRESS_DIR"
+
+    # Copy bin files from repo to ~/.claude-swarm/bin/
+    if [[ -f "$repo_dir/bin/swarm" ]]; then
+        cp "$repo_dir/bin/swarm" "$SWARM_BIN/swarm"
+        chmod +x "$SWARM_BIN/swarm"
+        echo "  Installed bin/swarm"
+    fi
+    if [[ -f "$repo_dir/bin/swarm-hook.sh" ]]; then
+        cp "$repo_dir/bin/swarm-hook.sh" "$SWARM_BIN/swarm-hook.sh"
+        chmod +x "$SWARM_BIN/swarm-hook.sh"
+        echo "  Installed bin/swarm-hook.sh"
+    fi
+
+    # Copy web files from repo to ~/.claude-swarm/web/
+    if [[ -d "$repo_dir/web" ]]; then
+        mkdir -p "$SWARM_DIR/web/public"
+        for f in server.ts state.ts actions.ts package.json package-lock.json; do
+            [[ -f "$repo_dir/web/$f" ]] && cp "$repo_dir/web/$f" "$SWARM_DIR/web/$f"
+        done
+        for f in index.html style.css app.js; do
+            [[ -f "$repo_dir/web/public/$f" ]] && cp "$repo_dir/web/public/$f" "$SWARM_DIR/web/public/$f"
+        done
+        echo "  Installed web dashboard"
+    fi
+
+    # Ensure Claude settings directory exists
+    mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+
+    # Merge Stop hook into settings.json
+    local hook_cmd="$SWARM_BIN/swarm-hook.sh"
+    local new_hook
+    new_hook=$(jq -n --arg cmd "$hook_cmd" '{
+        "hooks": [
+            {
+                "type": "command",
+                "command": $cmd,
+                "async": true
+            }
+        ]
+    }')
+
+    if [[ -f "$CLAUDE_SETTINGS" ]]; then
+        if jq -e ".hooks.Stop[]? | select(.hooks[]?.command == \"$hook_cmd\")" "$CLAUDE_SETTINGS" &>/dev/null; then
+            echo "  Hook already installed in settings.json"
+        else
+            local tmp
+            tmp=$(mktemp)
+            jq --argjson hook "$new_hook" '.hooks.Stop = (.hooks.Stop // []) + [$hook]' "$CLAUDE_SETTINGS" > "$tmp"
+            mv "$tmp" "$CLAUDE_SETTINGS"
+            echo "  Added Stop hook to $CLAUDE_SETTINGS"
+        fi
+    else
+        jq -n --argjson hook "$new_hook" '{"hooks": {"Stop": [$hook]}}' > "$CLAUDE_SETTINGS"
+        echo "  Created $CLAUDE_SETTINGS with Stop hook"
+    fi
+
+    # Symlink swarm into PATH
+    local link_target=""
+    if [[ -d "$HOME/.local/bin" ]]; then
+        link_target="$HOME/.local/bin/swarm"
+    elif [[ -d "/usr/local/bin" ]]; then
+        link_target="/usr/local/bin/swarm"
+    else
+        mkdir -p "$HOME/.local/bin"
+        link_target="$HOME/.local/bin/swarm"
+        echo "  Created ~/.local/bin/ — add it to your PATH if needed"
+    fi
+
+    if [[ -L "$link_target" ]] || [[ -e "$link_target" ]]; then
+        rm -f "$link_target"
+    fi
+    ln -s "$SWARM_BIN/swarm" "$link_target"
+    echo "  Symlinked swarm → $link_target"
+
+    echo ""
+    echo "Setup complete. Run 'swarm up' to launch agents."
+}
+
+# ─── up ───
+cmd_up() {
+    local num_agents="$DEFAULT_NUM"
+    local work_dir="$(pwd)"
+    local session="$DEFAULT_SESSION"
+    local layout="grid"
+    local attach_mode=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--num-agents) [[ $# -ge 2 ]] || die "-n requires a value"; num_agents="$2"; shift 2 ;;
+            -d|--dir) [[ $# -ge 2 ]] || die "-d requires a value"; work_dir="$2"; shift 2 ;;
+            -s|--session) [[ $# -ge 2 ]] || die "-s requires a value"; session="$2"; shift 2 ;;
+            --tabs) layout="tabs"; shift ;;
+            --headless) attach_mode=false; shift ;;
+            -*)  die "Unknown option '$1'. Run 'swarm --help'." ;;
+            *)
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    num_agents="$1"
+                else
+                    work_dir="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate
+    if ! [[ "$num_agents" =~ ^[0-9]+$ ]] || [[ "$num_agents" -lt 1 ]] || [[ "$num_agents" -gt 10 ]]; then
+        die "--num-agents must be between 1 and 10 (got: $num_agents)"
+    fi
+    [[ -d "$work_dir" ]] || die "--dir '$work_dir' is not a valid directory"
+    command -v tmux &>/dev/null || die "tmux is not installed. Run: brew install tmux"
+    command -v claude &>/dev/null || die "claude CLI is not installed."
+
+    # Resolve absolute path
+    work_dir="$(cd "$work_dir" && pwd)"
+
+    # If session already exists, re-write state files and attach/dash
+    if tmux has-session -t "$session" 2>/dev/null; then
+        echo "$session" > "$SESSION_FILE"
+        echo "$work_dir" > "$WORKDIR_FILE"
+        echo "$layout" > "$LAYOUT_FILE"
+        echo "$num_agents" > "$NUM_AGENTS_FILE"
+        if [[ "$attach_mode" == true ]]; then
+            echo "Session '$session' already exists. Attaching..."
+            exec tmux attach -t "$session"
+        else
+            echo "Session '$session' already exists. Opening dashboard..."
+            cmd_dash
+            return
+        fi
+    fi
+
+    # Clear stale state files
+    rm -f "$STATUS_DIR"/agent-*.status
+    rm -f "$COST_DIR"/agent-*.cost
+    rm -f "$TASKS_DIR"/agent-*.task
+    rm -f "$CHECKS_DIR"/agent-*.json
+    rm -f "$PROGRESS_DIR"/agent-*.json
+    rm -f "$PROGRESS_DIR"/agent-*.files
+    rm -f "$PROGRESS_DIR"/agent-*.lastlines
+    mkdir -p "$CHECKS_DIR" "$PROGRESS_DIR"
+
+    # Write session state
+    echo "$session" > "$SESSION_FILE"
+    echo "$work_dir" > "$WORKDIR_FILE"
+    echo "$layout" > "$LAYOUT_FILE"
+    echo "$num_agents" > "$NUM_AGENTS_FILE"
+
+    # ── Git worktrees ──
+    local use_worktrees=false
+    if git -C "$work_dir" rev-parse --is-inside-work-tree &>/dev/null; then
+        use_worktrees=true
+        echo "Git repo detected — creating worktrees for agent isolation."
+
+        local gitignore="$work_dir/.gitignore"
+        if [[ -f "$gitignore" ]]; then
+            grep -qF '.worktrees/' "$gitignore" || echo '.worktrees/' >> "$gitignore"
+        else
+            echo '.worktrees/' > "$gitignore"
+        fi
+
+        mkdir -p "$work_dir/.worktrees"
+
+        for i in $(seq 1 "$num_agents"); do
+            local wt_dir="$work_dir/.worktrees/agent-$i"
+            local branch="swarm/agent-$i"
+
+            [[ -d "$wt_dir" ]] && continue
+
+            if ! git -C "$work_dir" show-ref --verify --quiet "refs/heads/$branch"; then
+                git -C "$work_dir" branch "$branch" HEAD
+            fi
+            git -C "$work_dir" worktree add "$wt_dir" "$branch" 2>/dev/null || true
+        done
+    fi
+
+    # Helper: resolve agent directory
+    agent_dir() {
+        local n="$1"
+        if [[ "$use_worktrees" == true ]]; then
+            echo "$work_dir/.worktrees/agent-$n"
+        else
+            echo "$work_dir"
+        fi
+    }
+
+    # ── Create tmux session ──
+    if [[ "$layout" == "grid" ]]; then
+        _up_grid "$session" "$num_agents"
+    else
+        _up_tabs "$session" "$num_agents"
+    fi
+
+    # Write initial status files (agents start idle at prompt)
+    for i in $(seq 1 "$num_agents"); do
+        echo "idle" > "$STATUS_DIR/agent-$i.status"
+    done
+
+    # Select first agent
+    if [[ "$layout" == "grid" ]]; then
+        local pane_base
+        pane_base="$(get_pane_base)"
+        tmux select-pane -t "$session:swarm.$pane_base"
+    else
+        tmux select-window -t "$session:agent-1"
+    fi
+
+    # Print cheat sheet
+    if [[ "$layout" == "grid" ]]; then
+        cat << 'EOF'
+
+╔══════════════════════════════════════════════════════════════╗
+║                  Swarm Command Center (Grid)                 ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  NAVIGATE                                                    ║
+║  ────────                                                    ║
+║  Click pane          Select an agent (mouse)                 ║
+║  Ctrl+b Arrow        Move between panes                     ║
+║  Ctrl+b q N          Show pane numbers, press N to select   ║
+║  Ctrl+b z            Zoom in/out (toggle fullscreen pane)   ║
+║  Ctrl+b d            Detach (agents keep running)           ║
+║                                                              ║
+║  MANAGE (from another terminal)                              ║
+║  ──────                                                      ║
+║  swarm plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
+║  swarm send 2 "run tests"        Send message               ║
+║  swarm dash                       Dashboard with health     ║
+║  swarm diff 3 --stat              Review agent's changes    ║
+║  swarm check all                  Run tests on all agents   ║
+║  swarm ship 1                     Check→commit→merge→push   ║
+║  swarm down                       Kill session              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+EOF
+    else
+        cat << 'EOF'
+
+╔══════════════════════════════════════════════════════════════╗
+║                 Swarm Command Center (Tabs)                  ║
+╠══════════════════════════════════════════════════════════════╣
+║                                                              ║
+║  SWITCH AGENTS                                               ║
+║  ─────────────                                               ║
+║  Ctrl+b 1 .. 9   Switch to agent 1-9                        ║
+║  Ctrl+b d        Detach (agents keep running)               ║
+║                                                              ║
+║  MANAGE (from another terminal)                              ║
+║  ──────                                                      ║
+║  swarm plan "t1" "t2" "t3" ...   Brain-dump all tasks       ║
+║  swarm send 2 "run tests"        Send message               ║
+║  swarm dash                       Dashboard with health     ║
+║  swarm diff 3 --stat              Review agent's changes    ║
+║  swarm check all                  Run tests on all agents   ║
+║  swarm ship 1                     Check→commit→merge→push   ║
+║  swarm down                       Kill session              ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+EOF
+    fi
+
+    if [[ "$use_worktrees" == true ]]; then
+        echo "  Agents have isolated git worktrees. Use 'swarm merge <N>' to merge."
+    fi
+    echo "  Launching $num_agents agents in $layout mode..."
+    echo ""
+
+    if [[ "$attach_mode" == true ]]; then
+        exec tmux attach -t "$session"
+    else
+        echo "  Agents running headlessly. Opening dashboard..."
+        cmd_dash
+    fi
+}
+
+# Grid mode: single window, N panes, tiled layout
+_up_grid() {
+    local session="$1" num="$2"
+
+    # First pane — must create session BEFORE querying options,
+    # because tmux server may not be running yet (no .tmux.conf loaded)
+    local dir1
+    dir1="$(agent_dir 1)"
+    tmux new-session -d -s "$session" -n "swarm" -c "$dir1"
+
+    # Disable automatic-rename IMMEDIATELY — tmux will rename "swarm" to "bash"/"zsh"
+    # before split-window can target it by name, causing splits to silently fail
+    tmux set-option -t "$session" allow-rename off
+    tmux set-window-option -t "$session:swarm" automatic-rename off
+
+    # NOW query pane base index (server is running, .tmux.conf is loaded)
+    local pane_base
+    pane_base=$(tmux show-window-option -gv pane-base-index 2>/dev/null || echo 0)
+    [[ -n "$pane_base" ]] || pane_base=0
+    echo "$pane_base" > "$PANE_BASE_FILE"
+
+    tmux send-keys -t "$session:swarm.$pane_base" "export SWARM_AGENT_NUM=1 && claude" Enter
+
+    # Additional panes
+    for i in $(seq 2 "$num"); do
+        local dir_i
+        dir_i="$(agent_dir "$i")"
+        if ! tmux split-window -t "$session:swarm" -c "$dir_i"; then
+            echo "Warning: terminal too small for $num panes. Created $((i-1)) agents."
+            echo "$((i-1))" > "$NUM_AGENTS_FILE"
+            break
+        fi
+        tmux select-layout -t "$session:swarm" tiled
+        tmux send-keys -t "$session:swarm.$((i - 1 + pane_base))" "export SWARM_AGENT_NUM=$i && claude" Enter
+    done
+
+    # Final tiled layout
+    tmux select-layout -t "$session:swarm" tiled
+
+    # Pane borders with titles (use @agent_title user option so Claude can't overwrite it)
+    tmux set-option -t "$session" pane-border-status top
+    tmux set-option -t "$session" pane-border-format " #{@agent_title} "
+    tmux set-option -t "$session" pane-border-style "fg=#555555"
+    tmux set-option -t "$session" pane-active-border-style "fg=#5f87ff"
+
+    # Set initial pane titles via user option (immune to app escape sequences)
+    for i in $(seq 1 "$num"); do
+        tmux set-option -p -t "$session:swarm.$((i - 1 + pane_base))" @agent_title "Agent $i" 2>/dev/null || true
+    done
+
+    # Mouse support (click to select pane, scroll)
+    tmux set-option -t "$session" mouse on
+
+    # Status bar
+    tmux set-option -t "$session" status-style "bg=#1c1c1c,fg=#808080"
+    tmux set-option -t "$session" status-left "#[fg=#5f87ff,bold] SWARM #[fg=#555555]| "
+    tmux set-option -t "$session" status-left-length 20
+    tmux set-option -t "$session" status-right "#($SWARM_BIN/swarm _status_bar) #[fg=#555555]| #[fg=#808080]%H:%M "
+    tmux set-option -t "$session" status-right-length 80
+    tmux set-option -t "$session" status-interval 5
+}
+
+# Tabs mode: N windows, one agent per window
+_up_tabs() {
+    local session="$1" num="$2"
+
+    for i in $(seq 1 "$num"); do
+        local dir_i
+        dir_i="$(agent_dir "$i")"
+        if [[ "$i" -eq 1 ]]; then
+            tmux new-session -d -s "$session" -n "agent-1" -c "$dir_i"
+            tmux send-keys -t "$session:agent-1" "export SWARM_AGENT_NUM=1 && claude" Enter
+        else
+            tmux new-window -t "$session" -n "agent-$i" -c "$dir_i"
+            tmux send-keys -t "$session:agent-$i" "export SWARM_AGENT_NUM=$i && claude" Enter
+        fi
+    done
+
+    # Prevent tmux from auto-renaming windows to the running process
+    tmux set-option -t "$session" allow-rename off
+    tmux set-window-option -t "$session" automatic-rename off
+
+    # Status bar
+    tmux set-option -t "$session" status-right "#($SWARM_BIN/swarm _status_bar) | %H:%M "
+    tmux set-option -t "$session" status-right-length 80
+    tmux set-option -t "$session" status-interval 5
+}
+
+# ─── task ───
+cmd_task() {
+    [[ $# -ge 2 ]] || die "Usage: swarm task <agent-num> \"<description>\" [--send]"
+
+    local agent_num="$1"
+    local description="$2"
+    local send_flag=false
+
+    shift 2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --send) send_flag=true; shift ;;
+            *) die "Unknown option '$1'" ;;
+        esac
+    done
+
+    [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
+
+    local session layout slug target
+    session="$(get_session)"
+    layout="$(get_layout)"
+    slug="$(slugify "$description")"
+
+    target="$(find_agent_target "$agent_num")" || die "Agent $agent_num not found"
+
+    # Write task file
+    echo "$description" > "$TASKS_DIR/agent-$agent_num.task"
+
+    if [[ "$layout" == "grid" ]]; then
+        # Update pane title via user option (immune to app escape sequences)
+        tmux set-option -p -t "$target" @agent_title "[$agent_num] $slug" 2>/dev/null || \
+            die "Could not update pane title. Is agent $agent_num running?"
+        echo "Agent $agent_num → [$agent_num] $slug"
+    else
+        # Rename tmux window (no colons — they break tmux targeting)
+        tmux rename-window -t "$target" "$agent_num-$slug" 2>/dev/null || \
+            die "Could not rename window. Is agent $agent_num running?"
+        echo "Agent $agent_num → $agent_num-$slug"
+    fi
+
+    # Optionally send as prompt
+    if [[ "$send_flag" == true ]]; then
+        # Re-find target after potential rename
+        target="$(find_agent_target "$agent_num")" || die "Agent $agent_num not found after rename"
+        tmux send-keys -t "$target" -l "$description"
+        tmux send-keys -t "$target" Enter
+        echo "Sent task to agent $agent_num"
+    fi
+}
+
+# ─── send ───
+cmd_send() {
+    [[ $# -ge 2 ]] || die "Usage: swarm send <agent-num> \"<message>\""
+
+    local agent_num="$1"
+    local message="$2"
+
+    [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
+
+    local target
+    target="$(find_agent_target "$agent_num")" || die "Agent $agent_num not found"
+
+    tmux send-keys -t "$target" -l "$message"
+    tmux send-keys -t "$target" Enter
+    echo "Sent to agent $agent_num: $message"
+}
+
+# ─── plan ───
+cmd_plan() {
+    local tasks=()
+    local file=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --file|-f) [[ $# -ge 2 ]] || die "--file requires a value"; file="$2"; shift 2 ;;
+            -*) die "Unknown option '$1'" ;;
+            *) tasks+=("$1"); shift ;;
+        esac
+    done
+
+    # Read tasks from file if specified
+    if [[ -n "$file" ]]; then
+        [[ -f "$file" ]] || die "Task file '$file' not found"
+        while IFS= read -r line; do
+            line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [[ -n "$line" ]] && [[ "$line" != \#* ]] && tasks+=("$line")
+        done < "$file"
+    fi
+
+    [[ ${#tasks[@]} -gt 0 ]] || die "Usage: swarm plan \"<task1>\" \"<task2>\" ... [--file tasks.md]"
+
+    local num_agents
+    num_agents="$(get_num_agents)"
+    local session
+    session="$(get_session)"
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    tmux has-session -t "$session" 2>/dev/null || die "No active swarm session '$session'"
+
+    if [[ ${#tasks[@]} -gt "$num_agents" ]]; then
+        echo "Warning: ${#tasks[@]} tasks but only $num_agents agents. Extra tasks will be skipped."
+    fi
+
+    local count=${#tasks[@]}
+    [[ "$count" -gt "$num_agents" ]] && count=$num_agents
+
+    for i in $(seq 1 "$count"); do
+        local desc="${tasks[$((i-1))]}"
+        echo "Agent $i → $desc"
+        cmd_task "$i" "$desc" --send
+    done
+
+    if [[ "$count" -lt "$num_agents" ]]; then
+        echo ""
+        echo "Agents $((count+1))-$num_agents are unassigned."
+    fi
+
+    # Generate CLAUDE.md with task context and awareness
+    generate_claude_md "$work_dir"
+
+    echo ""
+    echo "Dispatched $count tasks. CLAUDE.md written to each worktree."
+}
+
+# ─── diff ───
+cmd_diff() {
+    [[ $# -ge 1 ]] || die "Usage: swarm diff <N|all> [--stat|--files]"
+
+    local target="$1"
+    shift
+
+    local mode="full"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --stat) mode="stat"; shift ;;
+            --files) mode="files"; shift ;;
+            *) die "Unknown option '$1'" ;;
+        esac
+    done
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    if [[ "$target" == "all" ]]; then
+        local num_agents
+        num_agents="$(get_num_agents)"
+        for i in $(seq 1 "$num_agents"); do
+            local wt_dir="$work_dir/.worktrees/agent-$i"
+            [[ -d "$wt_dir" ]] || continue
+
+            local task="-"
+            [[ -f "$TASKS_DIR/agent-$i.task" ]] && task=$(head -1 "$TASKS_DIR/agent-$i.task")
+
+            echo "── Agent $i: $task ──"
+            git -C "$wt_dir" diff --stat main 2>/dev/null || echo "  (no changes)"
+            echo ""
+        done
+        return 0
+    fi
+
+    [[ "$target" =~ ^[0-9]+$ ]] || die "Agent number must be a number or 'all'"
+
+    local wt_dir="$work_dir/.worktrees/agent-$target"
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $target"
+
+    case "$mode" in
+        stat)
+            git -C "$wt_dir" diff --stat main
+            ;;
+        files)
+            git -C "$wt_dir" diff --name-only main
+            ;;
+        full)
+            # Use delta or diff-so-fancy if available, else pager
+            if command -v delta &>/dev/null; then
+                git -C "$wt_dir" diff main | delta
+            elif command -v diff-so-fancy &>/dev/null; then
+                git -C "$wt_dir" diff main | diff-so-fancy | less -RFX
+            else
+                git -C "$wt_dir" diff main
+            fi
+            ;;
+    esac
+}
+
+# ─── log ───
+cmd_log() {
+    [[ $# -ge 1 ]] || die "Usage: swarm log <N>"
+
+    local agent_num="$1"
+    [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num"
+
+    git -C "$wt_dir" log main..HEAD --oneline
+}
+
+# ─── check ───
+cmd_check() {
+    [[ $# -ge 1 ]] || die "Usage: swarm check <N|all> [--fix]"
+
+    local target="$1"
+    shift
+
+    local fix_flag=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fix) fix_flag=true; shift ;;
+            *) die "Unknown option '$1'" ;;
+        esac
+    done
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    if [[ "$target" == "all" ]]; then
+        local num_agents
+        num_agents="$(get_num_agents)"
+        for i in $(seq 1 "$num_agents"); do
+            _run_checks "$i" "$work_dir" "$fix_flag" &
+        done
+        wait
+        return 0
+    fi
+
+    [[ "$target" =~ ^[0-9]+$ ]] || die "Agent number must be a number or 'all'"
+    _run_checks "$target" "$work_dir" "$fix_flag"
+}
+
+# Internal: run checks for a single agent
+_run_checks() {
+    local agent_num="$1"
+    local work_dir="$2"
+    local fix_flag="${3:-false}"
+
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || { echo "Agent $agent_num: no worktree"; return 1; }
+
+    local checks
+    checks=$(detect_checks "$wt_dir")
+    if [[ -z "$checks" ]]; then
+        # Try main work_dir for config
+        checks=$(detect_checks "$work_dir")
+    fi
+
+    if [[ -z "$checks" ]]; then
+        echo "Agent $agent_num: no check commands detected. Add .swarm.json or a standard build config."
+        return 1
+    fi
+
+    mkdir -p "$CHECKS_DIR"
+
+    local results=()
+    local overall="pass"
+    local fail_output=""
+    local timestamp
+    timestamp=$(date +%s)
+
+    echo "── Agent $agent_num: running checks ──"
+
+    while IFS= read -r cmd; do
+        [[ -n "$cmd" ]] || continue
+        local start_ms
+        start_ms=$(($(date +%s) * 1000))
+
+        local output
+        local status="pass"
+        if output=$(cd "$wt_dir" && eval "$cmd" 2>&1); then
+            status="pass"
+        else
+            status="fail"
+            overall="fail"
+            fail_output="$fail_output\n--- $cmd ---\n$output"
+        fi
+
+        local end_ms
+        end_ms=$(($(date +%s) * 1000))
+        local duration_ms=$((end_ms - start_ms))
+
+        # Truncate output for JSON storage
+        local short_output
+        short_output=$(echo "$output" | tail -5)
+
+        results+=("{\"command\":$(echo "$cmd" | jq -Rs .),\"status\":\"$status\",\"output\":$(echo "$short_output" | jq -Rs .),\"duration_ms\":$duration_ms}")
+
+        if [[ "$status" == "pass" ]]; then
+            echo "  ✓ $cmd"
+        else
+            echo "  ✗ $cmd"
+        fi
+    done <<< "$checks"
+
+    # Write results JSON
+    local results_json
+    results_json=$(printf '%s\n' "${results[@]}" | jq -s '.')
+    jq -n --argjson ts "$timestamp" --argjson results "$results_json" --arg overall "$overall" \
+        '{timestamp: $ts, results: $results, overall: $overall}' > "$CHECKS_DIR/agent-$agent_num.json"
+
+    echo "  Overall: $overall"
+
+    # Play notification sound
+    if command -v afplay &>/dev/null; then
+        if [[ "$overall" == "pass" ]]; then
+            afplay /System/Library/Sounds/Glass.aiff &>/dev/null &
+        else
+            afplay /System/Library/Sounds/Basso.aiff &>/dev/null &
+        fi
+    elif command -v paplay &>/dev/null; then
+        paplay /usr/share/sounds/freedesktop/stereo/complete.oga &>/dev/null &
+    fi
+
+    # --fix: send failure output to agent
+    if [[ "$fix_flag" == true ]] && [[ "$overall" == "fail" ]]; then
+        local fix_msg
+        fix_msg=$(printf "Tests/checks failed. Fix them:\n%b" "$fail_output" | head -50)
+        cmd_send "$agent_num" "$fix_msg"
+        echo "  Sent failure output to agent $agent_num"
+    fi
+}
+
+# ─── commit ───
+cmd_commit() {
+    [[ $# -ge 1 ]] || die "Usage: swarm commit <N> [-m \"message\"]"
+
+    local agent_num="$1"
+    shift
+    [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
+
+    local message=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -m) [[ $# -ge 2 ]] || die "-m requires a value"; message="$2"; shift 2 ;;
+            *) die "Unknown option '$1'" ;;
+        esac
+    done
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num"
+
+    # Auto-generate commit message from task if not specified
+    if [[ -z "$message" ]]; then
+        local task=""
+        [[ -f "$TASKS_DIR/agent-$agent_num.task" ]] && task=$(head -1 "$TASKS_DIR/agent-$agent_num.task")
+
+        if [[ -n "$task" ]]; then
+            # Generate conventional commit prefix
+            local prefix="feat"
+            if [[ -f "$work_dir/.swarm.json" ]]; then
+                local cfg_prefix
+                cfg_prefix=$(jq -r '.commit_prefix // empty' "$work_dir/.swarm.json" 2>/dev/null)
+                [[ -n "$cfg_prefix" ]] && prefix="$cfg_prefix"
+            fi
+
+            # Lowercase first letter, trim
+            local desc
+            local first_char
+            first_char=$(echo "$task" | cut -c1 | tr '[:upper:]' '[:lower:]')
+            local rest
+            rest=$(echo "$task" | cut -c2-72)
+            desc="${first_char}${rest}"
+            message="$prefix: $desc"
+        else
+            message="feat: agent $agent_num work"
+        fi
+    fi
+
+    echo "Agent $agent_num: committing..."
+    git -C "$wt_dir" add -A
+    if git -C "$wt_dir" diff --cached --quiet; then
+        echo "  No changes to commit."
+        return 0
+    fi
+    git -C "$wt_dir" commit -m "$message"
+    echo "  Committed: $message"
+}
+
+# ─── ship ───
+cmd_ship() {
+    [[ $# -ge 1 ]] || die "Usage: swarm ship <N|all>"
+
+    local target="$1"
+    shift
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    if [[ "$target" == "all" ]]; then
+        _ship_all "$work_dir"
+        return $?
+    fi
+
+    [[ "$target" =~ ^[0-9]+$ ]] || die "Agent number must be a number or 'all'"
+    _ship_one "$target" "$work_dir"
+}
+
+# Internal: ship a single agent
+_ship_one() {
+    local agent_num="$1"
+    local work_dir="$2"
+
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num"
+
+    echo "═══ Shipping Agent $agent_num ═══"
+
+    # 1. Check
+    echo "Step 1: Running checks..."
+    if ! _run_checks "$agent_num" "$work_dir" false; then
+        echo "Checks failed. Aborting ship."
+        return 1
+    fi
+
+    # Verify checks passed
+    if [[ -f "$CHECKS_DIR/agent-$agent_num.json" ]]; then
+        local overall
+        overall=$(jq -r '.overall' "$CHECKS_DIR/agent-$agent_num.json" 2>/dev/null)
+        if [[ "$overall" == "fail" ]]; then
+            echo "Checks failed. Aborting ship."
+            return 1
+        fi
+    fi
+
+    # 2. Commit
+    echo "Step 2: Committing..."
+    cmd_commit "$agent_num"
+
+    # 3. Merge
+    echo "Step 3: Merging..."
+    local branch="swarm/agent-$agent_num"
+    local current
+    current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
+    git -C "$work_dir" merge "$branch" --no-edit
+    echo "  Merged $branch into $current"
+
+    # 4. Push
+    echo "Step 4: Pushing..."
+    local remote="origin"
+    local push_branch="$current"
+    if [[ -f "$work_dir/.swarm.json" ]]; then
+        local cfg_remote cfg_branch
+        cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.swarm.json" 2>/dev/null)
+        cfg_branch=$(jq -r '.push_branch // empty' "$work_dir/.swarm.json" 2>/dev/null)
+        [[ -n "$cfg_remote" ]] && remote="$cfg_remote"
+        [[ -n "$cfg_branch" ]] && push_branch="$cfg_branch"
+    fi
+    git -C "$work_dir" push "$remote" "$push_branch"
+    echo "  Pushed to $remote/$push_branch"
+
+    echo ""
+    echo "✓ Agent $agent_num shipped successfully."
+}
+
+# Internal: ship all agents with conflict detection
+_ship_all() {
+    local work_dir="$1"
+    local num_agents
+    num_agents="$(get_num_agents)"
+
+    echo "═══ Shipping All Agents ═══"
+    echo ""
+
+    # 1. Collect modified files per agent (using temp dir for bash 3.2 compat)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" RETURN
+
+    local agents_with_changes=()
+
+    for i in $(seq 1 "$num_agents"); do
+        local wt_dir="$work_dir/.worktrees/agent-$i"
+        [[ -d "$wt_dir" ]] || continue
+
+        local files
+        files=$(git -C "$wt_dir" diff --name-only main 2>/dev/null)
+        if [[ -n "$files" ]]; then
+            echo "$files" | sort > "$tmp_dir/agent-$i.files"
+            agents_with_changes+=("$i")
+        fi
+    done
+
+    if [[ ${#agents_with_changes[@]} -eq 0 ]]; then
+        echo "No agents have changes to ship."
+        return 0
+    fi
+
+    # 2. Detect overlapping files
+    local conflicts=()
+    local conflicting_agents=()
+
+    for i in "${agents_with_changes[@]}"; do
+        for j in "${agents_with_changes[@]}"; do
+            [[ "$i" -ge "$j" ]] && continue
+            local overlap
+            overlap=$(comm -12 "$tmp_dir/agent-$i.files" "$tmp_dir/agent-$j.files")
+            if [[ -n "$overlap" ]]; then
+                conflicts+=("Agent $i ∩ Agent $j: $(echo "$overlap" | tr '\n' ', ' | sed 's/,$//')")
+                # Track conflicting agents (avoid duplicates)
+                local found=false
+                for c in "${conflicting_agents[@]}"; do [[ "$c" == "$i" ]] && found=true; done
+                $found || conflicting_agents+=("$i")
+                found=false
+                for c in "${conflicting_agents[@]}"; do [[ "$c" == "$j" ]] && found=true; done
+                $found || conflicting_agents+=("$j")
+            fi
+        done
+    done
+
+    # Build clean agents list (agents with changes but no conflicts)
+    local clean_agents=()
+    for i in "${agents_with_changes[@]}"; do
+        local is_conflicting=false
+        for c in "${conflicting_agents[@]}"; do
+            [[ "$c" == "$i" ]] && is_conflicting=true
+        done
+        $is_conflicting || clean_agents+=("$i")
+    done
+
+    # 3. Report conflicts
+    echo "Checking for conflicts..."
+    if [[ ${#conflicts[@]} -gt 0 ]]; then
+        for c in "${conflicts[@]}"; do
+            echo "  ⚠ $c — OVERLAP"
+        done
+    else
+        echo "  All agents: clean"
+    fi
+    echo ""
+
+    # 4. Run checks on clean agents
+    echo "Running checks on clean agents..."
+    local shippable=()
+    local failing=()
+    for i in "${clean_agents[@]}"; do
+        if _run_checks "$i" "$work_dir" false; then
+            local overall="pass"
+            if [[ -f "$CHECKS_DIR/agent-$i.json" ]]; then
+                overall=$(jq -r '.overall' "$CHECKS_DIR/agent-$i.json" 2>/dev/null)
+            fi
+            if [[ "$overall" == "pass" ]]; then
+                shippable+=("$i")
+            else
+                failing+=("$i")
+            fi
+        else
+            # No checks configured — ship anyway
+            shippable+=("$i")
+        fi
+    done
+
+    echo ""
+    echo "Ship plan:"
+    if [[ ${#shippable[@]} -gt 0 ]]; then
+        echo "  ✓ Ship agents: ${shippable[*]} (no conflicts, checks pass)"
+    fi
+    if [[ ${#failing[@]} -gt 0 ]]; then
+        echo "  ✗ Failing checks: ${failing[*]}"
+    fi
+    if [[ ${#conflicting_agents[@]} -gt 0 ]]; then
+        echo "  ⚠ Conflicting agents: ${conflicting_agents[*]}"
+        echo "    → Ship one first, then rebase the other and re-check"
+    fi
+    echo ""
+
+    # 5. Ship clean agents
+    for i in "${shippable[@]}"; do
+        echo "── Shipping agent $i ──"
+        cmd_commit "$i"
+        local branch="swarm/agent-$i"
+        git -C "$work_dir" merge "$branch" --no-edit
+        echo "  Merged $branch"
+    done
+
+    # Push once at the end
+    if [[ ${#shippable[@]} -gt 0 ]]; then
+        local current
+        current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
+        local remote="origin"
+        if [[ -f "$work_dir/.swarm.json" ]]; then
+            local cfg_remote
+            cfg_remote=$(jq -r '.push_remote // empty' "$work_dir/.swarm.json" 2>/dev/null)
+            [[ -n "$cfg_remote" ]] && remote="$cfg_remote"
+        fi
+        git -C "$work_dir" push "$remote" "$current"
+        echo ""
+        echo "✓ Pushed to $remote/$current"
+    fi
+
+    echo ""
+    echo "Summary: shipped ${#shippable[@]}, failed ${#failing[@]}, conflicts ${#conflicting_agents[@]}"
+}
+
+# ─── dash ───
+cmd_dash() {
+    local session
+    session="$(get_session)"
+    local mode="${1:-web}"
+
+    tmux has-session -t "$session" 2>/dev/null || die "No active swarm session '$session'"
+
+    # Recover state files if missing (e.g., after manual cleanup)
+    if [[ ! -f "$NUM_AGENTS_FILE" ]]; then
+        local layout
+        layout="$(get_layout)"
+        local pane_count
+        if [[ "$layout" == "tabs" ]]; then
+            pane_count=$(tmux list-windows -t "$session" 2>/dev/null | grep -c "agent-" || echo "0")
+        else
+            pane_count=$(tmux list-panes -t "$session" 2>/dev/null | wc -l | tr -d ' ')
+        fi
+        [[ "$pane_count" -gt 0 ]] && echo "$pane_count" > "$NUM_AGENTS_FILE"
+        [[ ! -f "$SESSION_FILE" ]] && echo "$session" > "$SESSION_FILE"
+        [[ ! -f "$LAYOUT_FILE" ]] && echo "grid" > "$LAYOUT_FILE"
+        [[ ! -f "$WORKDIR_FILE" ]] && pwd > "$WORKDIR_FILE"
+    fi
+
+    if [[ "$mode" == "term" || "$mode" == "terminal" ]]; then
+        # Terminal dashboard (original)
+        if [[ -n "${TMUX:-}" ]]; then
+            tmux new-window -t "$session" -n "dashboard" "$SWARM_BIN/swarm _dash_loop"
+        else
+            "$SWARM_BIN/swarm" _dash_loop
+        fi
+        return
+    fi
+
+    # Web dashboard
+    local web_dir="$SWARM_DIR/web"
+    local pid_file="$SWARM_DIR/web.pid"
+
+    # Check if already running
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid="$(cat "$pid_file")"
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Dashboard already running (pid $pid)"
+            echo "Opening http://127.0.0.1:7777"
+            open "http://127.0.0.1:7777" 2>/dev/null || echo "Visit http://127.0.0.1:7777"
+            return
+        fi
+        rm -f "$pid_file"
+    fi
+
+    # First-time setup: install dependencies
+    if [[ ! -d "$web_dir/node_modules" ]]; then
+        echo "Installing dashboard dependencies..."
+        (cd "$web_dir" && npm install --silent) || die "Failed to install dependencies"
+    fi
+
+    # Start server in background
+    # Use exec so subshell PID becomes the tsx process PID
+    (cd "$web_dir" && exec npx tsx server.ts &>/dev/null) &
+    local server_pid=$!
+    echo "$server_pid" > "$pid_file"
+
+    # Wait for server to be ready
+    local attempts=0
+    while ! curl -s -o /dev/null "http://127.0.0.1:7777" 2>/dev/null; do
+        sleep 0.3
+        attempts=$((attempts + 1))
+        if [[ $attempts -ge 20 ]]; then
+            echo "Warning: server may not have started"
+            break
+        fi
+        # Check if process died
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            rm -f "$pid_file"
+            die "Dashboard server failed to start"
+        fi
+    done
+
+    echo "Dashboard running at http://127.0.0.1:7777"
+    open "http://127.0.0.1:7777" 2>/dev/null || echo "Visit http://127.0.0.1:7777"
+}
+
+# Internal: dashboard rendering loop
+cmd_dash_loop() {
+    local session
+    session="$(get_session)"
+    local num_agents
+    num_agents="$(get_num_agents)"
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    while true; do
+        clear
+
+        printf "╔════╤════════════════════╤════════╤══════════╤═══════╤═══════╤════════╗\n"
+        printf "║ %-2s │ %-18s │ %-6s │ %-8s │ %-5s │ %-5s │ %-6s ║\n" "#" "Task" "Status" "Changes" "Tests" "Cost" "Health"
+        printf "╠════╪════════════════════╪════════╪══════════╪═══════╪═══════╪════════╣\n"
+
+        local total_input=0
+        local total_output=0
+        local ready_to_ship=()
+        local needs_fixing=()
+        local stuck=()
+
+        for i in $(seq 1 "$num_agents"); do
+            # Task name
+            local task_name="-"
+            if [[ -f "$TASKS_DIR/agent-$i.task" ]]; then
+                task_name=$(cut -c1-18 "$TASKS_DIR/agent-$i.task" | head -1)
+            fi
+
+            # Status detection
+            local status="working"
+            local status_file="$STATUS_DIR/agent-$i.status"
+            local file_age=999999
+            if [[ -f "$status_file" ]]; then
+                file_age=$(( $(date +%s) - $(stat -f %m "$status_file" 2>/dev/null || stat -c %Y "$status_file" 2>/dev/null || echo 0) ))
+                [[ "$file_age" -lt 30 ]] && status="idle"
+            fi
+
+            # Token counts (combined input+output for display)
+            local input_tok=0 output_tok=0
+            local cost_file="$COST_DIR/agent-$i.cost"
+            if [[ -f "$cost_file" ]]; then
+                input_tok=$(jq -r '.input_tokens // 0' "$cost_file" 2>/dev/null || echo 0)
+                output_tok=$(jq -r '.output_tokens // 0' "$cost_file" 2>/dev/null || echo 0)
+                total_input=$((total_input + input_tok))
+                total_output=$((total_output + output_tok))
+            fi
+            local total_tok=$((input_tok + output_tok))
+            local tok_display
+            if [[ "$total_tok" -ge 1000 ]]; then
+                tok_display="$(( total_tok / 1000 )).$(( (total_tok % 1000) / 100 ))k"
+            else
+                tok_display="$total_tok"
+            fi
+
+            # Changes — read cached progress data (written by hook), fallback to git
+            local changes_display="0f +0-0"
+            local files_changed=0
+            if [[ -f "$PROGRESS_DIR/agent-$i.json" ]]; then
+                local fc ins del
+                fc=$(jq -r '.files_changed // 0' "$PROGRESS_DIR/agent-$i.json" 2>/dev/null || echo 0)
+                ins=$(jq -r '.insertions // 0' "$PROGRESS_DIR/agent-$i.json" 2>/dev/null || echo 0)
+                del=$(jq -r '.deletions // 0' "$PROGRESS_DIR/agent-$i.json" 2>/dev/null || echo 0)
+                files_changed=${fc:-0}
+                changes_display="${fc:-0}f +${ins:-0}-${del:-0}"
+            elif [[ -d "$work_dir/.worktrees/agent-$i" ]]; then
+                local stats
+                stats=$(get_agent_diff_stats "$work_dir" "$i" 2>/dev/null)
+                if [[ -n "$stats" ]]; then
+                    local fc ins del
+                    fc=$(echo "$stats" | awk '{print $1}')
+                    ins=$(echo "$stats" | awk '{print $2}')
+                    del=$(echo "$stats" | awk '{print $3}')
+                    files_changed=${fc:-0}
+                    changes_display="${fc:-0}f +${ins:-0}-${del:-0}"
+                fi
+            fi
+
+            # Tests — from last check
+            local tests_display="  -  "
+            local check_overall=""
+            if [[ -f "$CHECKS_DIR/agent-$i.json" ]]; then
+                check_overall=$(jq -r '.overall // empty' "$CHECKS_DIR/agent-$i.json" 2>/dev/null)
+                if [[ "$check_overall" == "pass" ]]; then
+                    tests_display=" pass"
+                elif [[ "$check_overall" == "fail" ]]; then
+                    tests_display=" FAIL"
+                fi
+            fi
+
+            # Health heuristic
+            local health="●"  # green
+            if [[ "$total_tok" -gt 5000 ]] && [[ "$files_changed" -eq 0 ]]; then
+                health="●"  # red — burning money, no output
+                health=$'\033[31m●\033[0m'
+            elif [[ "$total_tok" -gt 3000 ]] && [[ "$files_changed" -eq 0 ]]; then
+                health=$'\033[33m●\033[0m'  # yellow
+            elif [[ "$status" == "idle" ]] && [[ "$check_overall" == "fail" ]]; then
+                health=$'\033[33m●\033[0m'  # yellow — done but broken
+            else
+                health=$'\033[32m●\033[0m'  # green
+            fi
+
+            # Status display
+            local status_display="work  "
+            [[ "$status" == "idle" ]] && status_display=" idle "
+
+            printf "║ %-2s │ %-18s │ %-6s │ %-8s │ %-5s │ %-5s │  %b   ║\n" \
+                "$i" "$task_name" "$status_display" "$changes_display" "$tests_display" "$tok_display" "$health"
+
+            # Categorize for summary
+            if [[ "$status" == "idle" ]] && [[ "$check_overall" == "pass" ]] && [[ "$files_changed" -gt 0 ]]; then
+                ready_to_ship+=("$i")
+            elif [[ "$status" == "idle" ]] && [[ "$check_overall" == "fail" ]]; then
+                needs_fixing+=("$i")
+            elif [[ "$status" == "working" ]] && [[ "$total_tok" -gt 5000 ]] && [[ "$files_changed" -eq 0 ]]; then
+                stuck+=("$i")
+            fi
+        done
+
+        printf "╠════╧════════════════════╧════════╧══════════╧═══════╧═══════╧════════╣\n"
+
+        # Bottom summary line
+        local summary=""
+        [[ ${#ready_to_ship[@]} -gt 0 ]] && summary="Ready to ship: ${ready_to_ship[*]}  "
+        [[ ${#needs_fixing[@]} -gt 0 ]] && summary="${summary}Needs fixing: ${needs_fixing[*]}  "
+        [[ ${#stuck[@]} -gt 0 ]] && summary="${summary}Stuck: ${stuck[*]}"
+        [[ -z "$summary" ]] && summary="Tokens: in=$total_input out=$total_output"
+        printf "║ %-69s ║\n" "$summary"
+        printf "╚═════════════════════════════════════════════════════════════════════════╝\n"
+        echo ""
+        echo "  Press Ctrl+C to close"
+
+        sleep 2
+    done
+}
+
+# ─── merge ───
+cmd_merge() {
+    [[ $# -ge 1 ]] || die "Usage: swarm merge <agent-num>"
+
+    local agent_num="$1"
+    [[ "$agent_num" =~ ^[0-9]+$ ]] || die "Agent number must be a number"
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    local wt_dir="$work_dir/.worktrees/agent-$agent_num"
+    [[ -d "$wt_dir" ]] || die "No worktree for agent $agent_num. Worktrees only exist when 'swarm up' runs in a git repo."
+
+    local branch="swarm/agent-$agent_num"
+    local current
+    current=$(git -C "$work_dir" rev-parse --abbrev-ref HEAD)
+
+    echo "Merging '$branch' into '$current'..."
+    git -C "$work_dir" merge "$branch" --no-edit
+    echo "Merge complete."
+}
+
+# ─── down ───
+cmd_down() {
+    local session
+    session="$(get_session)"
+
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        echo "No active session '$session'."
+        return 0
+    fi
+
+    local work_dir
+    work_dir="$(get_workdir)"
+
+    # Kill web dashboard if running
+    local pid_file="$SWARM_DIR/web.pid"
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid="$(cat "$pid_file")"
+        if kill "$pid" 2>/dev/null; then
+            echo "Dashboard server stopped."
+        fi
+        rm -f "$pid_file"
+    fi
+
+    tmux kill-session -t "$session"
+    echo "Session '$session' killed."
+
+    if [[ -d "$work_dir/.worktrees" ]]; then
+        echo ""
+        echo "Note: Git worktrees still exist at $work_dir/.worktrees/"
+        echo "Agents may have uncommitted work. Review before deleting."
+        echo "To remove: git -C $work_dir worktree remove .worktrees/agent-N"
+    fi
+
+    rm -f "$SESSION_FILE" "$WORKDIR_FILE" "$LAYOUT_FILE" "$NUM_AGENTS_FILE" "$PANE_BASE_FILE"
+    rm -f "$CHECKS_DIR"/agent-*.json
+    rm -f "$PROGRESS_DIR"/agent-*.json "$PROGRESS_DIR"/agent-*.files "$PROGRESS_DIR"/agent-*.lastlines
+}
+
+# ─── status ───
+cmd_status() {
+    local session
+    session="$(get_session)"
+    local layout
+    layout="$(get_layout)"
+    local num_agents
+    num_agents="$(get_num_agents)"
+
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        echo "No active swarm session."
+        return 0
+    fi
+
+    echo "Session: $session  Layout: $layout  Agents: $num_agents"
+
+    if [[ "$layout" == "grid" ]]; then
+        for i in $(seq 1 "$num_agents"); do
+            local task="-"
+            [[ -f "$TASKS_DIR/agent-$i.task" ]] && task=$(head -1 "$TASKS_DIR/agent-$i.task")
+
+            local st="working"
+            local sf="$STATUS_DIR/agent-$i.status"
+            if [[ -f "$sf" ]]; then
+                local age=$(( $(date +%s) - $(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo 0) ))
+                [[ "$age" -lt 30 ]] && st="idle"
+            fi
+            printf "  %s: %-30s [%s]\n" "$i" "$task" "$st"
+        done
+    else
+        tmux list-windows -t "$session" -F "  #{window_index}: #{window_name}" 2>/dev/null
+    fi
+}
+
+# Internal: tmux status bar content (called by tmux every status-interval)
+cmd_status_bar() {
+    local num_agents
+    num_agents="$(get_num_agents)"
+    [[ "$num_agents" -gt 0 ]] 2>/dev/null || exit 0
+
+    local output=""
+    for i in $(seq 1 "$num_agents"); do
+        local label="$i"
+        if [[ -f "$TASKS_DIR/agent-$i.task" ]]; then
+            label=$(head -c 8 "$TASKS_DIR/agent-$i.task" | tr ' [:upper:]' '-[:lower:]' | tr -cd 'a-z0-9-')
+            [[ -n "$label" ]] || label="$i"
+        fi
+
+        local indicator=".."
+        local sf="$STATUS_DIR/agent-$i.status"
+        if [[ -f "$sf" ]]; then
+            local age=$(( $(date +%s) - $(stat -f %m "$sf" 2>/dev/null || stat -c %Y "$sf" 2>/dev/null || echo 0) ))
+            [[ "$age" -lt 30 ]] && indicator="ok"
+        fi
+
+        output="$output $label:$indicator"
+    done
+
+    echo "${output# }"
+}
+
+# ═══════════════════════════════════════════════════════════
+# DISPATCHER
+# ═══════════════════════════════════════════════════════════
+
+[[ $# -ge 1 ]] || usage
+
+case "$1" in
+    setup)       shift; cmd_setup "$@" ;;
+    up)          shift; cmd_up "$@" ;;
+    task)        shift; cmd_task "$@" ;;
+    send)        shift; cmd_send "$@" ;;
+    plan)        shift; cmd_plan "$@" ;;
+    diff)        shift; cmd_diff "$@" ;;
+    log)         shift; cmd_log "$@" ;;
+    check)       shift; cmd_check "$@" ;;
+    commit)      shift; cmd_commit "$@" ;;
+    ship)        shift; cmd_ship "$@" ;;
+    dash)        shift; cmd_dash "$@" ;;
+    _dash_loop)  shift; cmd_dash_loop "$@" ;;
+    _status_bar) shift; cmd_status_bar "$@" ;;
+    merge)       shift; cmd_merge "$@" ;;
+    down)        shift; cmd_down "$@" ;;
+    status)      shift; cmd_status "$@" ;;
+    -h|--help|help) usage ;;
+    *)           die "Unknown command '$1'. Run 'swarm --help'." ;;
+esac

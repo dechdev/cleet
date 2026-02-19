@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swarm Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <h1>SWARM</h1>
+      <span class="session-info" id="session-info"></span>
+    </div>
+    <div class="header-actions">
+      <button class="btn" onclick="showPlanModal()">Plan</button>
+      <button class="btn" onclick="api('/api/check-all', {})">Check All</button>
+      <button class="btn btn-primary" onclick="confirmAction('Ship All?', () => api('/api/ship-all', {}))">Ship All</button>
+    </div>
+  </header>
+
+  <main class="agent-grid" id="agent-grid"></main>
+
+  <footer class="summary-bar" id="summary-bar">
+    <span id="summary-text"></span>
+  </footer>
+
+  <!-- Output modal (diff, log, action results) -->
+  <div class="modal-overlay" id="output-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="output-modal-title">Output</h2>
+        <button class="modal-close" onclick="closeModal('output-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <pre id="output-modal-content"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Plan modal -->
+  <div class="modal-overlay" id="plan-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Plan Tasks</h2>
+        <button class="modal-close" onclick="closeModal('plan-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <textarea class="plan-textarea" id="plan-input" placeholder="Enter tasks, one per line:&#10;&#10;Build JWT auth middleware&#10;Create API endpoints for /users&#10;Write integration tests"></textarea>
+        <p class="plan-hint">One task per line. Each task will be assigned to an agent.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('plan-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitPlan()">Assign Tasks</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

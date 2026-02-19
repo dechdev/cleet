@@ -1,0 +1,12 @@
+{
+  "name": "swarm-dashboard",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "tsx server.ts"
+  },
+  "dependencies": {
+    "tsx": "^4"
+  }
+}
